@@ -38,6 +38,7 @@ _status_logged = False
 # The agent's on_change callback runs on package-managed worker threads.
 _event_lock = threading.Lock()
 _stopping = False
+_start_requested = False
 
 
 def emit_event(event, /, **fields) -> None:
@@ -49,7 +50,15 @@ def load() -> bool:
     the installed package can stop ComfyUI from starting."""
     global _host, _failure
     try:
-        entry_points = {ep.name: ep for ep in importlib.metadata.entry_points(group=ENTRY_POINT_GROUP)}
+        points = list(importlib.metadata.entry_points(group=ENTRY_POINT_GROUP))
+        matches = [ep for ep in points if ep.name == PROTOCOL]
+        if len(matches) > 1:
+            logging.error("Multiple comfy-agent v1 hosts installed; remove conflicting packages.")
+            _failure = {"state": "failed", "reason": "ambiguous_host"}
+            emit_event("agent_error", reason="ambiguous_host")
+            _publish_flag()
+            return False
+        entry_points = {ep.name: ep for ep in points}
         if PROTOCOL not in entry_points:
             # Some comfy-agent is installed (other protocols present) -> "update";
             # nothing there -> "install". The file names the package without a
@@ -106,12 +115,14 @@ def start(server, scheme: str, address: str, port: int) -> None:
     # (claiming its data dir) while the flag reports failed, so bail out too.
     if _host is None or _failure is not None:
         return
+    global _stopping, _start_requested
+    with _event_lock:
+        if _stopping or _start_requested:
+            return
+        _start_requested = True
     host = "127.0.0.1" if address in ("", "0.0.0.0") else "::1" if address == "::" else address
     comfy_url = f"{scheme}://[{host}]:{port}" if ":" in host else f"{scheme}://{host}:{port}"
 
-    global _stopping
-    with _event_lock:
-        _stopping = False
     last_sent = None
 
     def on_change():
@@ -151,7 +162,13 @@ def start(server, scheme: str, address: str, port: int) -> None:
 
     # start() spawns and waits on the agent child, so keep it off the event loop.
     if server.loop is not None:
-        server.loop.run_in_executor(None, run)
+        try:
+            server.loop.run_in_executor(None, run)
+        except RuntimeError:
+            logging.exception("Could not schedule the local agent on a closing event loop.")
+            _failure = {"state": "failed", "reason": "spawn_failed"}
+            emit_event("agent_error", reason="spawn_failed")
+            on_change()
     else:
         run()
 
