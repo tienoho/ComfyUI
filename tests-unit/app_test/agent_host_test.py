@@ -381,3 +381,26 @@ def test_unexpected_wheel_status_fails_closed(monkeypatch, bad_status):
     assert agent_host.load()
     monkeypatch.setattr(agent_host._host, "status", lambda: bad_status)
     assert agent_host.feature_flag() == {"state": "failed", "reason": "unknown"}
+
+
+
+def test_agent_does_not_spawn_if_executor_callback_runs_after_shutdown(monkeypatch):
+    _entry_points(monkeypatch, {"v1": FakeHost})
+    assert agent_host.load()
+
+    class DeferredExecutor:
+        def __init__(self):
+            self.callback = None
+        def run_in_executor(self, executor, callback):
+            self.callback = callback
+
+    executor = DeferredExecutor()
+    server = SimpleNamespace(loop=executor, send_sync=lambda *args: None)
+    agent_host.start(server, "http", "127.0.0.1", 8188)
+    assert executor.callback is not None
+    assert agent_host._host.started is None
+
+    agent_host.stop()
+    executor.callback()
+    assert agent_host._host.started is None
+    assert agent_host._host.stopped == 1
