@@ -195,6 +195,9 @@ This does not connect to `/api/agent/events`, read private Agent storage,
 capture browser traffic, scrape the Panel, or require a new authentication
 token. You must already have a legally authorized JSONL export; **the stable
 Panel does not currently offer a built-in export workflow from this script**.
+The analyzer checks the public event/receipt **shape** but does not
+cryptographically authenticate JSONL provenance: report accuracy also depends
+on the trustworthiness and completeness of the supplied export.
 Do not export real customer prompts, tokens or identities into public CI logs.
 The report excludes all raw prompt text, chat content, user identity and
 thread/message IDs.
