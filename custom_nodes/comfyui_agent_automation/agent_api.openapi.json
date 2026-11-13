@@ -1,0 +1,228 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "ComfyUI Chat Automation API",
+    "version": "0.2.0",
+    "description": "Human-approved local workflow automation adapter. The API complements the official comfy-agent host and comfy-mcp; it does not replace or automatically register tools in either system."
+  },
+  "servers": [
+    {
+      "url": "/"
+    }
+  ],
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "Discovery"
+    },
+    {
+      "name": "Planning"
+    },
+    {
+      "name": "Execution"
+    }
+  ],
+  "paths": {
+    "/comfy-automation/v1/workflows": {
+      "get": {
+        "operationId": "listApprovedWorkflows",
+        "tags": [
+          "Discovery"
+        ],
+        "summary": "Discover approved workflows and editable inputs",
+        "responses": {
+          "200": {
+            "description": "Allowlisted workflow catalog"
+          },
+          "401": {
+            "description": "Invalid bearer token"
+          }
+        }
+      }
+    },
+    "/comfy-automation/v1/chat": {
+      "post": {
+        "operationId": "proposeWorkflowPlan",
+        "tags": [
+          "Planning"
+        ],
+        "summary": "Create a reviewable workflow plan, no execution",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "message"
+                ],
+                "properties": {
+                  "message": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 4000
+                  },
+                  "workflow_id": {
+                    "type": "string"
+                  },
+                  "session_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 8
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Plan ID, session ID, template revision and proposed parameters"
+          },
+          "400": {
+            "description": "Invalid plan or unsupported workflow"
+          },
+          "429": {
+            "description": "Too many pending plans or sessions"
+          }
+        }
+      }
+    },
+    "/comfy-automation/v1/runs": {
+      "post": {
+        "operationId": "confirmWorkflowRun",
+        "tags": [
+          "Execution"
+        ],
+        "summary": "Explicitly confirm and queue an approved plan",
+        "description": "High-impact operation. AI agents must not invoke it autonomously; obtain user confirmation. Reusing the same plan_id returns the existing run without duplicate jobs.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "plan_id"
+                ],
+                "properties": {
+                  "plan_id": {
+                    "type": "string",
+                    "format": "uuid"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Idempotent replay of already-created run"
+          },
+          "201": {
+            "description": "New run created"
+          },
+          "409": {
+            "description": "Template changed after proposal"
+          },
+          "429": {
+            "description": "Queue at capacity"
+          },
+          "503": {
+            "description": "Queue dispatch failed; inspect run_id before retrying"
+          }
+        }
+      }
+    },
+    "/comfy-automation/v1/runs/{run_id}": {
+      "get": {
+        "operationId": "getWorkflowRun",
+        "tags": [
+          "Execution"
+        ],
+        "summary": "Read a run status, including prompt IDs and output metadata",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Per-job state"
+          },
+          "404": {
+            "description": "Unknown or expired run"
+          }
+        }
+      }
+    },
+    "/comfy-automation/v1/runs/{run_id}/cancel": {
+      "post": {
+        "operationId": "cancelWorkflowRun",
+        "tags": [
+          "Execution"
+        ],
+        "summary": "Request cancellation of jobs belonging to a run",
+        "description": "Requires explicit authorization by user-facing agent clients. Does not cancel unrelated ComfyUI jobs.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "run_id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "IDs for jobs for which cancellation was requested"
+          },
+          "404": {
+            "description": "Unknown run"
+          }
+        }
+      }
+    },
+    "/comfy-automation/v1/openapi.json": {
+      "get": {
+        "operationId": "getAutomationOpenApi",
+        "tags": [
+          "Discovery"
+        ],
+        "summary": "Fetch this machine-readable tool contract",
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.1 schema"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "COMFY_AUTOMATION_TOKEN (24+ chars), for trusted single-user/LAN deployments; not multi-tenant auth."
+      }
+    }
+  }
+}

@@ -6,7 +6,6 @@ history status and cancellation without loading GPU models or ComfyUI itself.
 
 import asyncio
 import importlib.util
-import os
 import shutil
 import sys
 from pathlib import Path
@@ -60,6 +59,9 @@ def load_extension():
 
     execution_module.validate_prompt = validate
 
+    nodes_module = ModuleType("nodes")
+    nodes_module.NODE_CLASS_MAPPINGS = {}
+
     folder_paths_module = ModuleType("folder_paths")
     folder_paths_module.get_filename_list = lambda kind: ["installed.safetensors"]
 
@@ -72,9 +74,11 @@ def load_extension():
         "server": server_module,
         "execution": execution_module,
         "folder_paths": folder_paths_module,
+        "nodes": nodes_module,
         name: module,
     }):
         spec.loader.exec_module(module)
+    module._test_nodes = nodes_module
     return module, server, folder_paths_module
 
 
@@ -360,6 +364,63 @@ def test_invalid_count_and_oversized_payload(monkeypatch):
             too_big = await client.post(base + "/chat", headers=headers,
                                         data="x" * 18000)
             assert too_big.status == 413
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+
+def test_partner_api_nodes_are_blocked_before_queue(monkeypatch):
+    monkeypatch.setenv("COMFY_AUTOMATION_TOKEN", TOKEN)
+    monkeypatch.delenv("COMFY_AUTOMATION_LLM_MODEL", raising=False)
+    extension, server, _ = load_extension()
+
+    class PaidNode:
+        @classmethod
+        def GET_SCHEMA(cls):
+            return SimpleNamespace(is_api_node=True)
+
+    extension._test_nodes.NODE_CLASS_MAPPINGS["SaveImage"] = PaidNode
+
+    async def scenario():
+        app = web.Application()
+        app.add_routes(server.routes)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        headers = {"Authorization": "Bearer " + TOKEN}
+        try:
+            base = "/comfy-automation/v1"
+            plan = await client.post(base + "/chat", headers=headers,
+                                     json={"message": "Tạo ảnh"})
+            plan_id = (await plan.json())["plan_id"]
+            res = await client.post(base + "/runs", headers=headers, json={"plan_id": plan_id})
+            assert res.status == 403
+            assert not server.prompt_queue.items
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_machine_readable_openapi_is_authenticated(monkeypatch):
+    monkeypatch.setenv("COMFY_AUTOMATION_TOKEN", TOKEN)
+    extension, server, _ = load_extension()
+
+    async def scenario():
+        app = web.Application()
+        app.add_routes(server.routes)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            base = "/comfy-automation/v1/openapi.json"
+            denied = await client.get(base)
+            assert denied.status == 401
+            allowed = await client.get(base, headers={"Authorization": "Bearer " + TOKEN})
+            assert allowed.status == 200
+            schema = await allowed.json()
+            assert schema["openapi"] == "3.1.0"
+            assert "confirmWorkflowRun" == schema["paths"]["/comfy-automation/v1/runs"]["post"]["operationId"]
         finally:
             await client.close()
 

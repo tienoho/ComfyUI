@@ -103,3 +103,43 @@ def test_plan_parameters_cannot_change_graph_connections(registry):
         registry.validate_plan({
             "workflow_id": "image", "parameters": {"6": {"inputs": {"text": "bad"}}}, "count": 1,
         })
+
+
+
+def test_template_revision_pins_both_manifest_and_graph(registry):
+    original = registry.revision("image")
+    assert len(original) == 64
+    graph_path = registry.directory / "image.api.json"
+    graph_path.write_text(graph_path.read_text() + " ", encoding="utf-8")
+    assert registry.revision("image") != original
+    after_graph = registry.revision("image")
+    manifest_path = registry.directory / "image.json"
+    manifest_path.write_text(manifest_path.read_text() + " ", encoding="utf-8")
+    assert registry.revision("image") != after_graph
+
+
+def test_template_revision_rejects_symlink(registry, tmp_path):
+    graph_path = registry.directory / "image.api.json"
+    other = tmp_path.parent / "other-graph.json"
+    other.write_text(graph_path.read_text(), encoding="utf-8")
+    graph_path.unlink()
+    graph_path.symlink_to(other)
+    with pytest.raises(engine.PlanError, match="symlink"):
+        registry.revision("image")
+
+
+def test_invalid_multiple_of_and_choice_types_rejected(registry):
+    manifest_path = registry.directory / "image.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["inputs"]["seed"]["multiple_of"] = 0
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(engine.PlanError, match="multiple_of"):
+        registry.validate_plan({"workflow_id": "image", "parameters": {"seed": 2}})
+    manifest["inputs"]["seed"]["multiple_of"] = 2
+    manifest["inputs"]["seed"]["choices"] = [True, 2]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(engine.PlanError, match="allowed choice"):
+        registry.validate_plan({"workflow_id": "image", "parameters": {"seed": 1}})
+    assert registry.validate_plan({
+        "workflow_id": "image", "parameters": {"seed": 2},
+    })["parameters"]["seed"] == 2

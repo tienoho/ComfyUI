@@ -51,8 +51,8 @@ app.registerExtension({
     el("option", { value: "", text: "Tự động chọn workflow" }, workflow);
 
     const countRow = el("div", { className: "comfy-automation-row" }, controls);
-    el("label", { text: "Số tác vụ (1–8)" }, countRow);
-    const count = el("input", { type: "number", min: "1", max: "8", step: "1", value: "1" }, countRow);
+    el("label", { text: "Số tác vụ (1–8; để trống cho AI chọn)" }, countRow);
+    const count = el("input", { type: "number", min: "1", max: "8", step: "1", value: "", placeholder: "Mặc định / AI chọn" }, countRow);
     count.setAttribute("aria-label", "Batch count");
 
     const messages = el("div", { id: "comfy-automation-messages" }, panel);
@@ -66,6 +66,7 @@ app.registerExtension({
     let busy = false;
     let sessionId = null;
     let currentConfirm = null;
+    let llmConfigured = false;
     const pollTimers = new Map();
 
     const message = (text, isUser = false) => {
@@ -103,6 +104,7 @@ app.registerExtension({
       setBusy(true);
       try {
         const data = await api("/workflows");
+        llmConfigured = data.llm_configured;
         workflow.replaceChildren();
         el("option", { value: "", text: "Tự động chọn workflow" }, workflow);
         for (const item of data.workflows) el("option", { value: item.id, text: item.name }, workflow);
@@ -186,8 +188,9 @@ app.registerExtension({
 
     send.addEventListener("click", async () => {
       if (busy || !prompt.value.trim()) return;
-      const batch = Number(count.value);
-      if (!Number.isInteger(batch) || batch < 1 || batch > 8) {
+      const hasBatch = count.value.trim() !== "";
+      const batch = hasBatch ? Number(count.value) : null;
+      if (hasBatch && (!Number.isInteger(batch) || batch < 1 || batch > 8)) {
         message("Số tác vụ phải là số nguyên từ 1 đến 8.");
         return;
       }
@@ -197,7 +200,7 @@ app.registerExtension({
       try {
         const data = await api("/chat", "POST", {
           message: userText,
-          count: batch,
+          ...(hasBatch ? { count: batch } : {}),
           ...(sessionId ? { session_id: sessionId } : {}),
           ...(workflow.value ? { workflow_id: workflow.value } : {}),
         });
@@ -205,7 +208,9 @@ app.registerExtension({
         if (currentConfirm) currentConfirm.disabled = true;
         message("Kế hoạch đề xuất (hết hạn sau " + Math.round(data.expires_in_seconds / 60) +
           " phút):\n" + JSON.stringify(data.plan, null, 2));
-        message("Có thể gửi tiếp yêu cầu chỉnh sửa. Agent sẽ dùng ngữ cảnh kế hoạch trước.");
+        message(llmConfigured ?
+          "Có thể gửi tiếp yêu cầu chỉnh sửa. Agent dùng ngữ cảnh kế hoạch trước để lập kế hoạch mới." :
+          "Chế độ không LLM: tin nhắn tiếp theo là prompt mới, không tự suy luận các chỉ dẫn chỉnh sửa.");
         const confirm = el("button", { text: "✓ Xác nhận chạy" }, messages);
         currentConfirm = confirm;
         confirm.addEventListener("click", async () => {
@@ -227,6 +232,10 @@ app.registerExtension({
         });
         prompt.value = "";
       } catch (error) {
+        if (error.status === 404 && sessionId) {
+          sessionId = null;
+          message("Phiên chat cũ đã hết hạn. Gửi lại yêu cầu để tạo phiên mới.");
+        }
         message("Không lập được kế hoạch: " + error.message);
       } finally { setBusy(false); }
     });

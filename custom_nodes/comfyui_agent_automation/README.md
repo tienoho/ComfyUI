@@ -16,6 +16,17 @@ Neither the model engine nor the built-in /prompt routes are modified.
 - Uses ComfyUI's existing prompt validation, execution queue, history, and
   job-specific cancellation.
 - Supports a batch of 1 to 8 jobs with sequential seeds.
+- Supports bounded multi-turn conversation context: last 12 messages, sessions
+  expire after 60 minutes of inactivity (maximum 64 active sessions).
+- Plans are pinned to SHA-256 of the trusted manifest and API graph. An edit
+  after planning blocks execution until the user creates a fresh plan.
+- Confirmation is idempotent: retrying the same plan ID returns the existing
+  run ID and does not enqueue duplicate jobs.
+- Queue admission limit: total running + pending ComfyUI jobs + new jobs
+  must not exceed 32. There can be at most 128 pending plans and 256 runs
+  tracked by this host.
+- All official partner/API nodes marked as such by ComfyUI's node schema are
+  refused by the automation adapter, regardless of the trusted template.
 - Runs are in memory, so execution metadata does not survive restart.
   ComfyUI's native history remains the source of truth.
 
@@ -65,6 +76,10 @@ The LLM sends only the message and the allowed workflow descriptions to the
 configured provider. It never sends source images or complete workflow graphs.
 Without an LLM, select a workflow in the UI: the message is inserted into its
 declared prompt field. When exactly one workflow exists, selection is optional.
+Without an LLM, chat history remains available to the server but **natural
+language revisions are not interpreted**: the next message becomes the next
+prompt. With a configured LLM, the last plan and bounded chat history are
+included to support follow-up instructions. No LLM may execute a workflow.
 
 ## Register and run workflows
 
@@ -95,12 +110,16 @@ token is not configured, requests fail closed with HTTP 503.
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | /comfy-automation/v1/workflows | Approved workflow list |
+| GET | /comfy-automation/v1/openapi.json | OpenAPI 3.1 contract for external agent tool adapters |
 | POST | /comfy-automation/v1/chat | Plan from message, optional workflow_id |
 | POST | /comfy-automation/v1/runs | Confirm and queue a previously returned plan_id |
 | GET | /comfy-automation/v1/runs/{run_id} | Per-job state and output metadata |
 | POST | /comfy-automation/v1/runs/{run_id}/cancel | Cancel only this run |
 
-Plans expire after 15 minutes and may be confirmed once. Chat requests cannot
+Plans expire after 15 minutes. They may execute only once, but repeated
+confirmation calls are safe and return the existing run ID (HTTP 200
+instead of 201). After template changes, confirmation returns HTTP 409 and
+requires re-planning. Chat requests cannot
 supply a raw graph or URL. Up to 8 prompt graphs are validated before any are
 enqueued. These endpoints assume single-process ComfyUI, matching its current
 in-process queue and state ownership.
@@ -117,8 +136,13 @@ in-process queue and state ownership.
 - Template administrators control which nodes are present in each graph; a
   registered graph may still have network or filesystem side effects via
   third-party nodes.
+- Official ComfyUI partner/API nodes carrying the is_api_node flag are blocked
+  here even if an administrator accidentally registers one. Third-party custom
+  nodes may still call external services or incur charges without advertising
+  that flag. Audit the exact nodes in every approved template.
 - Provider costs, content policy, media review and GPU quotas are external
-  operational responsibilities. The batch limit of 8 is not a GPU budget.
+  operational responsibilities. The batch limit of 8 and queue admission of
+  32 are not GPU time/VRAM budgets.
 - No automatic recurring scheduler, durable chat history, or multi-user RBAC
   is claimed in this initial integration.
 
@@ -138,5 +162,53 @@ Then check manually on a machine with ComfyUI and an installed checkpoint:
 6. If configured, test an LLM's multi-template selection and confirm the
    returned plan cannot alter undeclared node fields.
 
-The code is an initial safe integration and requires GPU/runtime validation
-before production sign-off.
+## Agent interoperability: reuse the official ecosystem
+
+The optional official comfy-agent host and its `/api/agent` routes have
+their own lifecycle and API. This extension **does not** automatically register
+itself as a tool of that closed-package host. Do not claim integration until
+its concrete tool registration interface has been tested against the installed
+wheel.
+
+Comfy-Org also maintains **comfy-mcp** for Claude Code, Cursor and other local
+AI agents. For node/model discovery, UI-independent workflow execution and
+external MCP clients, install and use the maintained first-party tool rather
+than creating a second MCP implementation. The extension is complementary:
+it adds human-approved, centrally allowlisted, bounded runs inside ComfyUI.
+
+External agents requiring the stricter workflow-approval path can consume the
+machine-readable local OpenAPI 3.1 document:
+
+    GET /comfy-automation/v1/openapi.json
+
+Supply the same Bearer token. The schema describes discovery, planning,
+status, cancellation and approval routes. **Execution requires explicit
+user confirmation; do not let an unattended LLM autonomously call the
+confirmWorkflowRun operation.**
+
+## Execution states and failure handling
+
+- `queued` and `running` come from ComfyUI's existing queue; `completed`
+  and `failed` come from its recorded job history.
+- `cancel_requested` is not final. A job may still complete before interruption.
+  `cancelled` means a cancellation was accepted and no final success is present.
+- A partial queue dispatch failure returns HTTP 503 with a `run_id`, attempts
+  best-effort targeted cancellation, and marks `dispatch_error`. The caller
+  must inspect that run before deciding to issue a new plan.
+- `unknown` means the engine has no visible queue/history record; it is not
+  counted as successful. Manually cleared ComfyUI history can cause this.
+- Run state and session context live in RAM; they are not durable after
+  restart. Native ComfyUI history and output files remain independent.
+- A single shared Bearer token is **not** a multi-user identity or authorization
+  system. Use only within a trusted local environment.
+
+## Verification limitations
+
+The focused tests use a mock execution queue and do not prove successful GPU
+inference. The inherited upstream test-launch workflow checks out Comfy-Org's
+upstream repository rather than this fork. CI from that workflow is not
+evidence of this extension's startup. Real server load, browser flows, model
+compatibility, multi-user tenancy and GPU generation require separate testing.
+
+The code is a hardened local-first integration but still requires real
+GPU/runtime validation before production sign-off.

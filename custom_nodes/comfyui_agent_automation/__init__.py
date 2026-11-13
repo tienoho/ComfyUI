@@ -19,6 +19,7 @@ from aiohttp import web
 
 import execution
 import folder_paths
+import nodes
 from server import PromptServer
 
 from .engine import PlanError, Registry
@@ -126,6 +127,14 @@ async def automation_workflows(request):
     })
 
 
+@_routes.get("/comfy-automation/v1/openapi.json")
+async def automation_openapi(request):
+    _authenticate(request)
+    response = web.FileResponse(Path(__file__).parent / "agent_api.openapi.json")
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
 @_routes.post("/comfy-automation/v1/chat")
 async def automation_chat(request):
     _authenticate(request)
@@ -188,6 +197,24 @@ def _plan_summary(plan):
     return json.dumps(plan, ensure_ascii=False, separators=(",", ":"))
 
 
+def _refuse_partner_api_nodes(graph):
+    """Paid Comfy partner/API nodes must never run through this adapter."""
+    checked = set()
+    for node in graph.values():
+        class_type = node.get("class_type") if isinstance(node, dict) else None
+        if class_type in checked:
+            continue
+        checked.add(class_type)
+        node_class = nodes.NODE_CLASS_MAPPINGS.get(class_type)
+        if node_class is None:
+            continue  # ComfyUI validate_prompt reports the missing node.
+        if getattr(node_class, "IS_API_NODE", False):
+            raise web.HTTPForbidden(text="Partner/API nodes are blocked in Chat Automation")
+        schema_getter = getattr(node_class, "GET_SCHEMA", None)
+        if callable(schema_getter) and getattr(schema_getter(), "is_api_node", False):
+            raise web.HTTPForbidden(text="Partner/API nodes are blocked in Chat Automation")
+
+
 @_routes.post("/comfy-automation/v1/runs")
 async def automation_run(request):
     _authenticate(request)
@@ -202,7 +229,8 @@ async def automation_run(request):
         if previous:
             run = _runs[previous]
             return web.json_response({
-                "run_id": previous, "prompt_ids": run["prompt_ids"], "replayed": True,
+                "run_id": previous, "prompt_ids": run["prompt_ids"],
+                "replayed": True, "dispatch_error": run["dispatch_error"],
             }, status=200)
 
         proposed = _pending.get(plan_id)
@@ -228,6 +256,7 @@ async def automation_run(request):
         for graph in graphs:
             prompt_id = str(uuid.uuid4())
             server.node_replace_manager.apply_replacements(graph)
+            _refuse_partner_api_nodes(graph)
             valid = await execution.validate_prompt(prompt_id, graph, None)
             if not valid[0]:
                 return web.json_response({
@@ -295,7 +324,8 @@ async def automation_run(request):
         _logger.info("Automation queued run_id=%s workflow_id=%s jobs=%d",
                      run_id, plan["workflow_id"], len(run["prompt_ids"]))
         return web.json_response({
-            "run_id": run_id, "prompt_ids": run["prompt_ids"], "replayed": False,
+            "run_id": run_id, "prompt_ids": run["prompt_ids"],
+            "replayed": False, "dispatch_error": False,
         }, status=201)
 
 
