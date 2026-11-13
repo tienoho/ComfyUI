@@ -66,7 +66,10 @@ This fork reuses ComfyUI's **official Agent Panel**; it does not install a secon
 interface. For local use, install the optional pre-release
 `comfy-agent[go-nonfree]` package into the same environment and start ComfyUI
 with `--enable-agent`. Read the [native Agent setup, health checks and
-limitations](NATIVE_AGENT_PANEL.md) before enabling it.
+limitations](NATIVE_AGENT_PANEL.md) before enabling it. For model/token/cost observability, the same guide
+documents the read-only `script_examples/agent_usage_report.py` report for
+authorized official Agent event exports; no duplicate chat or private API
+interception is installed.
 
 ## Examples
 See what ComfyUI can do with the [newer template workflows](https://comfy.org/workflows) or old [example workflows](https://comfyanonymous.github.io/ComfyUI_examples/).
