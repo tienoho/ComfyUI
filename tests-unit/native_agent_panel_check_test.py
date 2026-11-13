@@ -146,3 +146,44 @@ def test_auth_header_is_not_printed_and_is_derived_from_environment(
     key = "Authorization" if header_name == "Authorization" else "X-api-key"
     assert seen_headers[0][key] == expected
     assert "fake-test-token" not in capsys.readouterr().out
+
+
+
+@pytest.mark.parametrize("auth_header,wire_header", [
+    ("Authorization", "Authorization"),
+    ("X-API-KEY", "X-api-key"),
+])
+def test_cli_authenticated_probe_uses_env_token_without_exposing_it(
+        monkeypatch, capsys, auth_header, wire_header):
+    class Response:
+        status = 200
+        def __init__(self, body):
+            self.body = body
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            return None
+        def read(self, _size):
+            return self.body
+
+    seen = []
+
+    class Opener:
+        def open(self, request, timeout):
+            seen.append(request)
+            if request.full_url.endswith("/features"):
+                return Response(b'{"agent":{"state":"ready"}}')
+            assert request.full_url.endswith("/api/agent/identity")
+            return Response(b'{"user_id":"verified-user"}')
+
+    monkeypatch.setenv("COMFY_AGENT_PROBE_TOKEN", "secret-probe-token-123")
+    monkeypatch.setattr(probe, "_OPENER", Opener())
+    assert probe.main([
+        "--require-authenticated", "--auth-header", auth_header,
+    ]) == 0
+    assert len(seen) == 2
+    expected = "Bearer secret-probe-token-123" if auth_header == "Authorization" else "secret-probe-token-123"
+    assert all(request.headers[wire_header] == expected for request in seen)
+    output = capsys.readouterr()
+    assert '"identity_authenticated": true' in output.out
+    assert "secret-probe-token-123" not in output.out + output.err
