@@ -80,13 +80,22 @@ def probe_once(base: str, *, get_status=_get_status) -> dict:
     state, hint = interpret_feature(data)
     if state != "ready":
         return {"state": state, "hint": hint}
-    route_status, _ = get_status(base, "/api/agent/identity")
-    if route_status in (200, 401, 403):
-        return {
-            "state": "ready", "route_status": route_status,
-            "hint": "Open the built-in Agent panel and complete sign-in/consent",
-        }
-    raise ProbeError(f"Native /api/agent/identity route returned HTTP {route_status}")
+    route_status, identity_body = get_status(base, "/api/agent/identity")
+    if route_status == 200:
+        try:
+            identity = json.loads(identity_body)
+        except (ValueError, UnicodeDecodeError) as error:
+            raise ProbeError("Agent identity endpoint returned non-JSON content") from error
+        if (not isinstance(identity, dict)
+                or not isinstance(identity.get("user_id"), str)
+                or not identity["user_id"].strip()):
+            raise ProbeError("Agent identity endpoint returned invalid user_id")
+    elif route_status not in (401, 403):
+        raise ProbeError(f"Native /api/agent/identity route returned HTTP {route_status}")
+    return {
+        "state": "ready", "route_status": route_status,
+        "hint": "Open the built-in Agent panel and complete sign-in/consent",
+    }
 
 
 def main(argv: list[str] | None = None, *, get_status=_get_status) -> int:
