@@ -28,5 +28,9 @@ jobs:
           python-version: '3.12'
       - name: Install test runner
         run: python -m pip install pytest
+      - name: Validate Python syntax
+        run: python -m compileall -q custom_nodes/comfyui_agent_automation
+      - name: Validate frontend JavaScript syntax
+        run: node --input-type=module --check < custom_nodes/comfyui_agent_automation/web/automation.js
       - name: Run CPU-only validation tests
         run: python -m pytest -q tests-unit/agent_automation_test.py

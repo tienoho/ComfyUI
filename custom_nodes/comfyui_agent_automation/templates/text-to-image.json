@@ -39,7 +39,8 @@
       "type": "integer",
       "min": 256,
       "max": 2048,
-      "description": "Chiều rộng ảnh (chia hết cho 8)"
+      "description": "Chiều rộng ảnh (chia hết cho 8)",
+      "multiple_of": 8
     },
     "height": {
       "node_id": "5",
@@ -47,7 +48,8 @@
       "type": "integer",
       "min": 256,
       "max": 2048,
-      "description": "Chiều cao ảnh (chia hết cho 8)"
+      "description": "Chiều cao ảnh (chia hết cho 8)",
+      "multiple_of": 8
     }
   }
 }

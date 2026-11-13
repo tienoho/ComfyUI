@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import re
 from pathlib import Path
 
@@ -95,8 +96,8 @@ class Registry:
                 if type(item) is not int:
                     raise PlanError(key + " must be an integer")
             elif kind == "number":
-                if type(item) not in (int, float):
-                    raise PlanError(key + " must be numeric")
+                if type(item) not in (int, float) or not math.isfinite(item):
+                    raise PlanError(key + " must be a finite number")
             elif type(item) is not bool:
                 raise PlanError(key + " must be boolean")
             if kind in ("integer", "number"):
@@ -104,6 +105,8 @@ class Registry:
                     raise PlanError(key + " is below the minimum")
                 if "max" in spec and item > spec["max"]:
                     raise PlanError(key + " is above the maximum")
+            if "multiple_of" in spec and type(item) is int and item % spec["multiple_of"] != 0:
+                raise PlanError(key + " must be a multiple of " + str(spec["multiple_of"]))
             if "choices" in spec and item not in spec["choices"]:
                 raise PlanError(key + " is not an allowed choice")
             normalized[key] = item
