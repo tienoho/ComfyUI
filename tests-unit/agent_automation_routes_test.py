@@ -622,7 +622,7 @@ def test_concurrent_chat_in_one_session_preserves_context(monkeypatch):
     extension, server, _ = load_extension()
     observed = []
 
-    async def slow_plan(registry, message, preferred_id=None, *, history, previous_plan):
+    async def slow_plan(registry, message, preferred_id=None, *, history, previous_plan, canvas_context=None):
         observed.append((message, len(history), previous_plan))
         await asyncio.sleep(0.02)
         return {"workflow_id": "text-to-image", "parameters": {"prompt": message}, "count": 1}
@@ -715,6 +715,57 @@ def test_partial_llm_configuration_is_an_error_not_silent_fallback(monkeypatch):
             assert bad.status == 400
             assert "COMFY_AUTOMATION_LLM_URL" in (await bad.json())["error"]
             assert not extension._sessions
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+
+def test_canvas_context_is_readonly_and_limited(monkeypatch):
+    monkeypatch.setenv("COMFY_AUTOMATION_TOKEN", TOKEN)
+    monkeypatch.delenv("COMFY_AUTOMATION_LLM_MODEL", raising=False)
+    extension, server, _ = load_extension()
+    received = []
+
+    async def plan_with_context(registry, message, preferred_id=None, *,
+                                history, previous_plan, canvas_context=None):
+        received.append(canvas_context)
+        return {"workflow_id": "text-to-image", "parameters": {"prompt": message}, "count": 1}
+
+    extension.create_plan = plan_with_context
+
+    async def scenario():
+        app = web.Application()
+        app.add_routes(server.routes)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        headers = {"Authorization": "Bearer " + TOKEN}
+        endpoint = "/comfy-automation/v1/chat"
+        try:
+            valid = await client.post(endpoint, headers=headers, json={
+                "message": "Build an image",
+                "canvas_context": {"node_count": 2, "node_types": ["KSampler", "SaveImage"]},
+            })
+            assert valid.status == 200
+            assert received == [{"node_count": 2, "node_types": ["KSampler", "SaveImage"]}]
+            assert not server.prompt_queue.items
+
+            invalid = await client.post(endpoint, headers=headers, json={
+                "message": "Build an image",
+                "canvas_context": {
+                    "node_count": 1, "node_types": ["KSampler"],
+                    "graph": {"99": {"class_type": "Unsafe"}},
+                },
+            })
+            assert invalid.status == 400
+            assert len(received) == 1
+
+            oversized = await client.post(endpoint, headers=headers, json={
+                "message": "Build an image",
+                "canvas_context": {"node_count": 66, "node_types": ["KSampler"] * 66},
+            })
+            assert oversized.status == 400
         finally:
             await client.close()
 

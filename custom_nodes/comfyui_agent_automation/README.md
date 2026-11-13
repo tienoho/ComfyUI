@@ -9,6 +9,8 @@ Neither the model engine nor the built-in /prompt routes are modified.
 
 - Automation registers as a **native ComfyUI sidebar tab** when supported by
   the frontend. Older frontends get the original floating launcher as fallback.
+  It reads the `/features` state to indicate whether the first-party Comfy
+  Agent panel is available, but does not bypass its consent or call private UI APIs.
   It is separate from the official Comfy Agent panel: it does not claim to
   mutate or save the active canvas graph.
 - Use an OpenAI-compatible LLM to plan work from natural language, or select
@@ -21,6 +23,10 @@ Neither the model engine nor the built-in /prompt routes are modified.
 - Supports a batch of 1 to 8 jobs with sequential seeds.
 - Supports bounded multi-turn conversation context: last 12 messages, sessions
   expire after 60 minutes of inactivity (maximum 64 active sessions).
+- Users can optionally attach **read-only node class names** from the current
+  canvas to help the LLM select an approved template. Canvas widget contents,
+  prompts, assets, connections and API keys are deliberately excluded. This
+  action never modifies the canvas.
 - Users can inspect and edit declared parameters and batch size in the panel,
   then explicitly save a new plan revision before confirmation. Saving
   invalidates the older unconfirmed plan ID; no raw graph is submitted.
@@ -128,7 +134,7 @@ token is not configured, requests fail closed with HTTP 503.
 | --- | --- | --- |
 | GET | /comfy-automation/v1/workflows | Approved workflow list |
 | GET | /comfy-automation/v1/openapi.json | OpenAPI 3.1 contract for external agent tool adapters |
-| POST | /comfy-automation/v1/chat | Plan from message, optional workflow_id, session_id, checkpoint and count |
+| POST | /comfy-automation/v1/chat | Plan from message, optional workflow_id, session_id, checkpoint, count, and read-only canvas_context |
 | POST | /comfy-automation/v1/plans/{plan_id}/revise | Edit typed scalar inputs and/or batch size; returns a fresh plan ID without executing |
 | POST | /comfy-automation/v1/runs | Confirm and queue a previously returned plan_id |
 | GET | /comfy-automation/v1/runs/{run_id} | Per-job state and output metadata |
@@ -252,6 +258,10 @@ GPU/runtime validation before production sign-off.
    preferred tool for approved graph editing.
 3. The panel loads registered templates, installed checkpoints and input
    constraints directly from the host, not a hard-coded list of models.
+   Native Comfy Agent availability is shown from ComfyUI's feature flags,
+   without pretending the two agents share a private session or runtime.
+   User-selected canvas context includes **only** node class types; it never
+   sends image content or workflow parameters to the LLM.
 4. The user can inspect and modify plan parameters without another LLM call.
    Changes stay local to the form until `Lưu chỉnh sửa` is explicitly used.
    Confirmation of unsaved edits is disabled.
@@ -265,5 +275,7 @@ GPU/runtime validation before production sign-off.
 9. Only the workflows and typed scalar parameters declared in the trusted
    manifest may be controlled. No shell, arbitrary graph edits or paid
    ComfyUI API nodes are exposed through Automation.
-10. Real GPU output and visual UI/browser acceptance remain environment
+10. ComfyUI output images are previewed inline from native /view links.
+    Running jobs can be inspected and canceled individually by run ID.
+11. Real GPU output and visual UI/browser acceptance remain environment
     dependent and are not claimed as passing based on CPU-only tests.

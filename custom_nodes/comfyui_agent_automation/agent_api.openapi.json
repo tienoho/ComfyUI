@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "ComfyUI Chat Automation API",
-    "version": "0.3.0",
+    "version": "0.4.0",
     "description": "Human-approved local workflow automation adapter. The API complements the official comfy-agent host and comfy-mcp; it does not replace or automatically register tools in either system."
   },
   "servers": [
@@ -82,6 +82,31 @@
                   "checkpoint": {
                     "type": "string",
                     "description": "Installed checkpoint filename chosen by user; overrides LLM model selection"
+                  },
+                  "canvas_context": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "description": "Optional user-approved read-only summary of node classes from active canvas; no graph or widget values are accepted",
+                    "required": [
+                      "node_count",
+                      "node_types"
+                    ],
+                    "properties": {
+                      "node_count": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "maximum": 1024
+                      },
+                      "node_types": {
+                        "type": "array",
+                        "maxItems": 64,
+                        "items": {
+                          "type": "string",
+                          "minLength": 1,
+                          "maxLength": 128
+                        }
+                      }
+                    }
                   }
                 }
               }
@@ -98,7 +123,8 @@
           "429": {
             "description": "Too many pending plans or sessions"
           }
-        }
+        },
+        "description": "Creates a bounded, user-reviewable proposal from an approved template. Context from active canvas is informative only and must never be treated as executable graph data."
       }
     },
     "/comfy-automation/v1/runs": {

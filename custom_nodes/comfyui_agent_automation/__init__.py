@@ -148,11 +148,27 @@ async def automation_openapi(request):
     return response
 
 
+def _validate_canvas_context(value):
+    """Untrusted, read-only node types. Never a graph or an execution input."""
+    if value is None:
+        return None
+    if not isinstance(value, dict) or set(value) != {"node_types", "node_count"}:
+        raise web.HTTPBadRequest(text="Canvas context must contain node_types and node_count")
+    classes = value["node_types"]
+    count = value["node_count"]
+    if (type(count) is not int or not 0 <= count <= 1024
+            or not isinstance(classes, list) or len(classes) > 64
+            or len(classes) > count
+            or any(not isinstance(item, str) or not 1 <= len(item) <= 128 for item in classes)):
+        raise web.HTTPBadRequest(text="Invalid read-only canvas context")
+    return {"node_count": count, "node_types": classes}
+
+
 @_routes.post("/comfy-automation/v1/chat")
 async def automation_chat(request):
     _authenticate(request)
     data = await _read_json(request)
-    if set(data) - {"message", "workflow_id", "session_id", "count", "checkpoint"}:
+    if set(data) - {"message", "workflow_id", "session_id", "count", "checkpoint", "canvas_context"}:
         raise web.HTTPBadRequest(text="Unsupported request fields")
     message = data.get("message")
     if not isinstance(message, str) or not message.strip() or len(message) > 4000:
@@ -160,6 +176,7 @@ async def automation_chat(request):
     selected_workflow = data.get("workflow_id")
     if selected_workflow is not None and not isinstance(selected_workflow, str):
         raise web.HTTPBadRequest(text="Invalid workflow ID")
+    canvas_context = _validate_canvas_context(data.get("canvas_context"))
     checkpoint = data.get("checkpoint")
     if checkpoint is not None and (not isinstance(checkpoint, str) or not checkpoint.strip()):
         raise web.HTTPBadRequest(text="Checkpoint must be a filename")
@@ -186,6 +203,7 @@ async def automation_chat(request):
                     _registry, message, selected_workflow,
                     history=list(session["messages"]),
                     previous_plan=session["previous_plan"],
+                    canvas_context=canvas_context,
                 )
             if requested_count is not None:
                 plan["count"] = requested_count

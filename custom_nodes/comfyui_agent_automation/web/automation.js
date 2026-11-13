@@ -66,6 +66,11 @@ app.registerExtension({
     const checkpoint = el("select", {}, controls);
     checkpoint.setAttribute("aria-label", "Checkpoint đang cài đặt");
     el("option", { value: "", text: "Tự chọn khi có một checkpoint" }, checkpoint);
+    const canvasLabel = el("label", { className: "comfy-automation-row" }, controls);
+    const includeCanvas = el("input", { type: "checkbox", checked: false }, canvasLabel);
+    includeCanvas.style.flex = "0 0 auto";
+    el("span", { text: "Dùng loại node trên canvas làm ngữ cảnh (không gửi ảnh hoặc prompt)" }, canvasLabel);
+    const nativeStatus = el("div", { text: "Comfy Agent: đang kiểm tra trạng thái..." }, controls);
 
     const messages = el("div", { id: "comfy-automation-messages" }, panel);
     messages.setAttribute("role", "log");
@@ -130,6 +135,19 @@ app.registerExtension({
         for (const modelName of installedCheckpoints) {
           el("option", { value: modelName, text: modelName }, checkpoint);
         }
+        try {
+          const nativeFeatures = await fetch("/features", { credentials: "same-origin" });
+          if (nativeFeatures.ok) {
+            const flags = await nativeFeatures.json();
+            nativeStatus.textContent = flags?.agent?.state === "ready" ?
+              "Comfy Agent chính thức: sẵn sàng (chỉnh sửa canvas ở panel chính thức)." :
+              "Comfy Agent chính thức: chưa sẵn sàng. Automation vẫn hoạt động độc lập.";
+          } else {
+            nativeStatus.textContent = "Không đọc được trạng thái Comfy Agent.";
+          }
+        } catch {
+          nativeStatus.textContent = "Không đọc được trạng thái Comfy Agent.";
+        }
         message("Có " + data.workflows.length + " workflow được duyệt và " +
           installedCheckpoints.length + " checkpoint đã cài." +
           (data.llm_configuration_error ? " Cấu hình LLM chưa đủ URL và model." :
@@ -169,6 +187,12 @@ app.registerExtension({
                   const anchor = el("a", { href: "/view?" + query, text: asset.filename }, resultLinks);
                   anchor.target = "_blank";
                   anchor.rel = "noopener noreferrer";
+                  if (kind === "images") {
+                    const preview = el("img", {
+                      src: "/view?" + query, alt: asset.filename, loading: "lazy",
+                    }, anchor);
+                    preview.style.cssText = "display:block;max-width:100%;max-height:240px;object-fit:contain;margin:5px 0 10px;border-radius:6px";
+                  }
                   resultLinks.appendChild(document.createTextNode("  "));
                 }
               }
@@ -359,9 +383,30 @@ app.registerExtension({
       const userText = prompt.value.trim();
       message(userText, true);
       const indicator = message("Đang lập kế hoạch từ yêu cầu...");
+      const previousConfirm = currentConfirm;
+      const wasConfirmEnabled = previousConfirm && !previousConfirm.disabled;
+      if (previousConfirm) previousConfirm.disabled = true;
       setBusy(true);
       try {
+        let canvasContext = null;
+        if (includeCanvas.checked) {
+          if (!app.isGraphReady || typeof app.graphToPrompt !== "function") {
+            throw new Error("Chưa có canvas hợp lệ để lấy ngữ cảnh.");
+          }
+          // Extract only class names: never send widget values, image data,
+          // authentication tokens or the graph itself to the planning model.
+          const snapshot = await app.graphToPrompt();
+          const nodes = Object.values(snapshot.output || {});
+          if (nodes.length > 1024) throw new Error("Canvas quá nhiều node.");
+          canvasContext = {
+            node_count: nodes.length,
+            node_types: nodes.map((node) => node.class_type)
+              .filter((name) => typeof name === "string" && name.length > 0 && name.length <= 128)
+              .slice(0, 64),
+          };
+        }
         const data = await api("/chat", "POST", {
+          ...(canvasContext ? { canvas_context: canvasContext } : {}),
           message: userText,
           ...(hasBatch ? { count: batch } : {}),
           ...(checkpoint.value ? { checkpoint: checkpoint.value } : {}),
@@ -378,6 +423,7 @@ app.registerExtension({
         prompt.value = "";
       } catch (error) {
         indicator.textContent = "Không lập được kế hoạch: " + error.message;
+        if (wasConfirmEnabled && previousConfirm) previousConfirm.disabled = false;
         if (error.status === 404 && sessionId) {
           sessionId = null;
           message("Phiên chat đã hết hạn; gửi lại để tạo phiên mới.");
