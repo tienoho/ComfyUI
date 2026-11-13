@@ -20,7 +20,9 @@ def fake(status=200, feature=None, identity=401):
 
     def respond(base, path):
         assert base == "http://127.0.0.1:8188"
-        return (status, data) if path == "/features" else (identity, b"")
+        return (status, data) if path == "/features" else (
+            identity, b'{"user_id":"demo-user"}' if identity == 200 else b""
+        )
 
     return respond
 
@@ -70,3 +72,14 @@ def test_url_validation():
     with pytest.raises(ValueError):
         probe._base_url("http://localhost:8188/prompt")
     assert probe._base_url("http://localhost:8188/") == "http://localhost:8188"
+
+
+@pytest.mark.parametrize("identity_body", [b"<html>ComfyUI</html>", b"{}", b'{"user_id":""}', b"not json"])
+def test_false_ready_from_static_fallback_is_rejected(identity_body):
+    def respond(base, path):
+        if path == "/features":
+            return 200, b'{"agent":{"state":"ready"}}'
+        return 200, identity_body
+
+    with pytest.raises(probe.ProbeError, match="identity endpoint"):
+        probe.probe_once("http://127.0.0.1:8188", get_status=respond)
