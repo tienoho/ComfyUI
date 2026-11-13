@@ -123,8 +123,12 @@ jobs:
                           first = await ws.receive_json(timeout=10)
                           assert first["type"] == "status"
                           await ws.send_json({"type": "feature_flags", "data": {}})
-                          response = await ws.receive_json(timeout=10)
-                          assert response["type"] == "feature_flags"
+                          for _ in range(10):
+                              response = await ws.receive_json(timeout=10)
+                              if response["type"] == "feature_flags":
+                                  break
+                          else:
+                              raise AssertionError("Native feature negotiation did not respond")
                           assert response["data"]["agent"]["state"] == "ready"
               print("Official Agent ready state survives native websocket reconnect: PASS")
 
