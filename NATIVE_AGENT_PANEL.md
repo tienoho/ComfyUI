@@ -120,9 +120,11 @@ agent runtime.
 GitHub Actions checks that the published `comfy-agent==0.1.0rc8` wheel
 still exposes `comfyui.agent` protocol `v1` and passes `pip check`. It also
 starts the **actual fork** with the matching `go-nonfree` extra on CPU, probes
-the same-origin identity endpoint, checks the installed frontend and verifies
-that no duplicate Chat Automation extension is loaded. These tests validate
-bootstrap and integration, **not** signed-in browser turns or GPU generation.
+the same-origin identity endpoint, checks the installed frontend, verifies
+that no duplicate Chat Automation extension is loaded, and negotiates the
+native `/ws` feature flags across a fresh connection and reconnect. These
+tests validate bootstrap and integration, **not** signed-in browser turns or
+GPU generation.
 
 ## Recommended user journey
 
@@ -151,6 +153,9 @@ independent set of copied API graphs.
 | P1 | Multiple `comfyui.agent` v1 entry points could be selected unpredictably | Fail closed with `ambiguous_host`, require operator to remove conflicting installs |
 | P1 | Duplicate or late startup callbacks could spawn multiple Agent children | Only the first start may schedule work; executor scheduling errors publish `spawn_failed` |
 | P1 | A 401/403 identity response is insufficient proof that an authenticated user is ready | Opt-in environment-token probe requires HTTP 200 and the documented `user_id` shape |
+| P1 | Duplicate host entry point discovery could start the wrong agent distribution | Multiple `v1` providers are rejected; repeated `load()` reuses the same host |
+| P1 | ComfyUI's executor could fail to schedule an optional Agent child | Emits `spawn_failed` rather than leaving the UI permanently on `starting` |
+| P1 | Pre-release installation hints could select an incompatible placeholder package | Logs now use `python -m pip install --pre -U` in the active environment |
 
 These changes are in `app/agent_host.py`, its existing test suite and the
 small native probe. **No change is made to the official Agent Panel UI bundle,
@@ -245,3 +250,32 @@ first-party frontend, not within this repository's small Agent host wrapper.
   to loopback or behind a correctly configured authentication proxy.
 - No production readiness claim is made until actual GPU/browser UAT,
   account-level permissions, model licensing and recovery tests pass.
+
+
+## Agent Panel UAT scenarios on a real workstation
+
+The following require an actual account, the official frontend and an installed
+compatible model. Record the OS, ComfyUI commit, `comfy-agent` wheel version,
+frontend version, GPU model/VRAM and a redacted copy of the logs.
+
+| Case | Operation | Passing evidence |
+| --- | --- | --- |
+| A01 | Start without `--enable-agent` | Agent unavailable; native probe reports `disabled` |
+| A02 | Enable Agent with package missing/incompatible | Clear `package_missing` or `outdated` status; ComfyUI itself still serves |
+| A03 | Launch installed `comfy-agent` | `/features` is `ready`, first-party Agent button activates |
+| A04 | Attempt to send before login/consent | Official sign-in/consent gate blocks the send; no silent tool execution |
+| A05 | Sign in and accept first-party consent | One conversation in native Panel; correct account/workspace identity |
+| A06 | Request an image workflow | Agent selects a compatible installed model and creates or edits the live canvas |
+| A07 | Change prompt/steps/dimensions | Visible graph parameters match the user's instruction; no unrequested node deletion |
+| A08 | Execute approved graph with an actual model | Native queue runs once; output appears in the correct ComfyUI tab |
+| A09 | Introduce a missing model/node | Clear recovery guidance; no silent use of a different model |
+| A10 | Cancel a running workflow | Only intended run is affected; status and resources recover |
+| A11 | Interrupt/reconnect network while Panel is open | No duplicate chat turn or out-of-order canvas edits after reconnect |
+| A12 | Reload browser and reselect saved workflow | Previous workflow/chat target stays correct; no writes to an unrelated tab |
+| A13 | Restart ComfyUI with Agent active | Host stops, restarts and reconnects; old sockets are discarded |
+| A14 | Change signed-in account/workspace | Identity and consent belong to the new account; no cross-account chat leakage |
+| A15 | Open workflow with paid partner/API nodes | Official billing/consent gate controls paid execution |
+| A16 | Verify UI at narrow viewport | Native Agent dock remains usable; no separate floating Automation overlay |
+
+Do not mark this matrix complete based solely on GitHub Actions: an authenticated
+Agent session and a real GPU workload are prerequisites for the relevant cases.
