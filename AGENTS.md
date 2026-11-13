@@ -43,6 +43,16 @@
 - Keep in-panel tool extensions out of scope until the vendor publishes a
   stable, documented registration contract. Use approved native ComfyUI
   capabilities and `comfy-mcp` only for separate external-agent workflows.
+- For Agent observability, prefer the vendor's documented `agent_message_done`
+  token/charge contract and first-party credits UI. An absent charge means
+  *unknown*, not zero; vendor model charge is not automatically the invoice.
+  Never estimate actual cost from token counts alone.
+- Show LLM model IDs only with an authoritative, validated model receipt;
+  a model mentioned in prompt text, deployment documentation or a ComfyUI
+  image checkpoint is not proof of the Agent model used.
+- The offline `script_examples/agent_usage_report.py` is diagnostics for
+  authorized event exports, not a live traffic collector or a parallel UI.
+  Do not capture private Agent WebSocket frames or account tokens by default.
 - Require real signed-in browser and GPU UAT before describing an agent change
   as production-ready. CPU smoke tests verify boot and integration only.
 
