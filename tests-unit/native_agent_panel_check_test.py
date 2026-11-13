@@ -143,7 +143,6 @@ def test_auth_header_is_not_printed_and_is_derived_from_environment(
         "https://local.example", "/features", credential="fake-test-token",
         credential_header=header_name)
     assert status == 200 and body
-    assert seen_headers[0][header_name.capitalize()] == expected if header_name == "Authorization" else (
-        seen_headers[0]["X-api-key"] == expected
-    )
+    key = "Authorization" if header_name == "Authorization" else "X-api-key"
+    assert seen_headers[0][key] == expected
     assert "fake-test-token" not in capsys.readouterr().out
