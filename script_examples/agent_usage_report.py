@@ -171,6 +171,10 @@ def summarize_lines(lines) -> dict:
         "model_attribution": {
             "receipt_backed_turns": sum(bool(x.model_id) for x in items),
             "unknown_turns": sum(not x.model_id for x in items),
+            "selection_sources": {
+                "request": sum(x.model_source == "request" for x in items),
+                "deployment_default": sum(x.model_source == "deployment_default" for x in items),
+            },
             "note": "No model inferred from provider, text, deployment defaults or image-generation nodes",
         },
         "overall": _totals(items),
