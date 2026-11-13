@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+from functools import partial
 import sys
 import time
 from urllib.error import HTTPError, URLError
@@ -36,9 +38,13 @@ def _base_url(value: str) -> str:
     return value.rstrip("/")
 
 
-def _get_status(base: str, path: str, *, timeout: float = 3.0) -> tuple[int, bytes]:
+def _get_status(base: str, path: str, *, timeout: float = 3.0,
+                credential: str | None = None, credential_header: str = "Authorization") -> tuple[int, bytes]:
+    headers = {"Accept": "application/json"}
+    if credential is not None:
+        headers[credential_header] = "Bearer " + credential if credential_header == "Authorization" else credential
     try:
-        with _OPENER.open(Request(base + path, headers={"Accept": "application/json"}), timeout=timeout) as response:
+        with _OPENER.open(Request(base + path, headers=headers), timeout=timeout) as response:
             return response.status, response.read(65537)
     except HTTPError as error:
         error.close()
@@ -67,7 +73,7 @@ def interpret_feature(data: dict) -> tuple[str, str | None]:
     raise ProbeError(f"Unexpected 'agent' state: {state!r}")
 
 
-def probe_once(base: str, *, get_status=_get_status) -> dict:
+def probe_once(base: str, *, get_status=_get_status, require_authenticated: bool = False) -> dict:
     status, body = get_status(base, "/features")
     if status != 200:
         raise ProbeError(f"ComfyUI /features returned HTTP {status}")
@@ -92,8 +98,11 @@ def probe_once(base: str, *, get_status=_get_status) -> dict:
             raise ProbeError("Agent identity endpoint returned invalid user_id")
     elif route_status not in (401, 403):
         raise ProbeError(f"Native /api/agent/identity route returned HTTP {route_status}")
+    if require_authenticated and route_status != 200:
+        raise ProbeError("Agent identity did not authenticate: HTTP " + str(route_status))
     return {
         "state": "ready", "route_status": route_status,
+        "identity_authenticated": route_status == 200,
         "hint": "Open the built-in Agent panel and complete sign-in/consent",
     }
 
@@ -103,15 +112,32 @@ def main(argv: list[str] | None = None, *, get_status=_get_status) -> int:
     parser.add_argument("--url", default="http://127.0.0.1:8188", help="ComfyUI HTTP(S) origin")
     parser.add_argument("--wait-seconds", type=float, default=0,
                         help="Wait up to N seconds for ready (default: do not wait)")
+    parser.add_argument("--require-authenticated", action="store_true",
+                        help="Verify the authenticated identity API using COMFY_AGENT_PROBE_TOKEN")
+    parser.add_argument("--auth-header", choices=["Authorization", "X-API-KEY"],
+                        default="Authorization", help="Header carrying the environment token")
+    parser.add_argument("--allow-remote", action="store_true",
+                        help="Explicitly allow sending the token to a remote HTTPS origin")
     args = parser.parse_args(argv)
     try:
         base = _base_url(args.url)
+        if args.require_authenticated:
+            token = os.environ.get("COMFY_AGENT_PROBE_TOKEN", "")
+            if not token:
+                raise ValueError("COMFY_AGENT_PROBE_TOKEN is required for authenticated checks")
+            parsed = urlsplit(base)
+            if parsed.hostname not in ("localhost", "127.0.0.1", "::1"):
+                if not args.allow_remote or parsed.scheme != "https":
+                    raise ValueError("Authenticated remote checks require HTTPS and --allow-remote")
+            if get_status is _get_status:
+                get_status = partial(_get_status, credential=token, credential_header=args.auth_header)
         if not 0 <= args.wait_seconds <= 300:
             raise ValueError("--wait-seconds must be between 0 and 300")
         deadline = time.monotonic() + args.wait_seconds
         while True:
             try:
-                result = probe_once(base, get_status=get_status)
+                result = probe_once(base, get_status=get_status,
+                                    require_authenticated=args.require_authenticated)
             except (URLError, TimeoutError, OSError) as error:
                 result = {"state": "unreachable", "hint": str(error)}
             if result["state"] == "ready":
