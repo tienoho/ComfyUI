@@ -161,6 +161,77 @@ These changes are in `app/agent_host.py`, its existing test suite and the
 small native probe. **No change is made to the official Agent Panel UI bundle,
 private Agent endpoints, canvas CRDT logic, sign-in or user consent.**
 
+## Model and cost observability (read-only, native-first)
+
+**Source of truth:** The official Agent Panel is owned by the
+`comfyui-frontend-package`, not a separate Chat Agent. The fork pins frontend
+`1.59.1`. That released frontend can receive `agent_message_done.data.usage`
+with token counts, but its stable contract does **not** promise a billable
+`charge_micro_usd` or any model ID on every completion.
+
+The upstream frontend development branch (checked 13 November 2026) has
+advanced further: its generated `AgentTurnUsage` contract accepts optional
+`charge_micro_usd`, in **millionths of USD**, only when a priced charge was
+captured by the vendor. The official Panel's `agentEventTransport` already
+consumes this field to show credits on assistant messages. It also declares
+an `AgentModelReceipt` (model_id, selection source, profile revision) and
+`AgentModelSelection` request schema. These are **not an approved stable
+custom-extension API**, and a receipt is not yet guaranteed on the public
+`agent_message_done` event. Do not duplicate the upstream credits UI,
+write model switches directly to private endpoints, or guess the model from
+`claude`/provider names.
+
+### Offline aggregate report from authorized exports
+
+A stdlib-only analyzer reads **existing** official `agent_message_done`
+JSONL events or frontend development recordings with a `frame` wrapper:
+
+```bash
+python script_examples/agent_usage_report.py /path/to/authorized-agent-events.jsonl --pretty
+python script_examples/agent_usage_report.py /path/to/authorized-agent-events.jsonl --output ./agent-usage-summary.json
+```
+
+This does not connect to `/api/agent/events`, read private Agent storage,
+capture browser traffic, scrape the Panel, or require a new authentication
+token. You must already have a legally authorized JSONL export; **the stable
+Panel does not currently offer a built-in export workflow from this script**.
+Do not export real customer prompts, tokens or identities into public CI logs.
+The report excludes all raw prompt text, chat content, user identity and
+thread/message IDs.
+
+It reports exact token counts where present and a separately measured
+`vendor_model_charge.known_micro_usd` and `known_usd` only when the vendor
+actually returns a positive `charge_micro_usd`. Each metric has
+`reported_turns` and `unknown_turns`; **an absent charge means unknown,
+not $0 or free usage**. The total of known values is *not* necessarily the
+complete amount, the amount charged to a Comfy workspace, or the invoice
+total; use the vendor's first-party billing/usage logs for financial
+reconciliation. Duplicate terminal events after reconnect are deduplicated
+by the (thread_id, message_id) pair. Conflicting duplicates fail closed.
+
+The summary groups by model only when a **valid, explicit v1 model receipt**
+is present in the exported completion data. The current stable event schema
+does not promise such a receipt, so the normal result is
+`by_model.unknown`. The analyzer never invents a default model, maps
+image-generation checkpoints to chat LLMs, or estimates token cost from
+third-party pricing tables. No automatic live model/charge capture is claimed.
+
+### When upstream selection support is stable
+
+1. Confirm the shipped `comfyui-frontend-package`, `comfy-agent` wheel and
+   authorized public model-selection/receipt contract match.
+2. Reuse the official Panel's own model selector and per-turn credits display,
+   not an injected DOM badge or an independent sidebar.
+3. Verify every accepted turn receives the requested/effective model receipt,
+   with source and profile revision. A missing receipt must be shown as unknown.
+4. Verify debiting/credits against official billing records; distinguish
+   model execution charge from purchase price or partner-node execution cost.
+5. Add browser tests for unavailable model, workspace switch, reconnect,
+   charge missing, and paid execution confirmation before enabling changes.
+
+Until then, keep this as a read-only, offline diagnostic and do not alter
+the vendor's model router or private Agent message protocol.
+
 ## What this does *not* implement
 
 The `comfyui.agent` **v1** host contract exposes only:
