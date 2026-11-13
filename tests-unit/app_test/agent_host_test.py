@@ -404,3 +404,12 @@ def test_agent_does_not_spawn_if_executor_callback_runs_after_shutdown(monkeypat
     executor.callback()
     assert agent_host._host.started is None
     assert agent_host._host.stopped == 1
+
+
+
+@pytest.mark.parametrize("reason", [{}, [], 123, True])
+def test_invalid_host_reason_is_not_forwarded_to_frontend(monkeypatch, reason):
+    _entry_points(monkeypatch, {"v1": FakeHost})
+    assert agent_host.load()
+    agent_host._host.state = {"state": "failed", "reason": reason}
+    assert agent_host.feature_flag() == {"state": "failed", "reason": "unknown"}
