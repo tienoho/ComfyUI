@@ -223,7 +223,10 @@ def test_a_host_that_fails_to_start_reports_failed(monkeypatch, caplog):
     failed = {"state": "failed", "reason": "spawn_failed"}
     assert agent_host.feature_flag() == failed
     assert sent == [("agent_status", failed)]
-    assert _agent_records(caplog) == ["[agent-event] agent_error reason=spawn_failed"]
+    assert _agent_records(caplog) == [
+        "[agent-event] agent_error reason=spawn_failed",
+        "[agent-event] agent_state_changed state=failed reason=spawn_failed",
+    ]
 
 
 def test_register_hands_the_host_comfyuis_app(monkeypatch):
