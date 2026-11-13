@@ -47,6 +47,7 @@ def _reset(monkeypatch):
     monkeypatch.setattr(agent_host, "_failure", None)
     monkeypatch.setattr(agent_host, "_status_logged", False)
     monkeypatch.setattr(agent_host, "_stopping", False)
+    monkeypatch.setattr(agent_host, "_start_requested", False)
     # The loader publishes the agent flag by mutating this shared dict; keep that
     # leakage out of other tests.
     feature_flags.SERVER_FEATURE_FLAGS.pop("agent", None)
@@ -413,3 +414,65 @@ def test_invalid_host_reason_is_not_forwarded_to_frontend(monkeypatch, reason):
     assert agent_host.load()
     agent_host._host.state = {"state": "failed", "reason": reason}
     assert agent_host.feature_flag() == {"state": "failed", "reason": "unknown"}
+
+
+
+def test_two_v1_distributions_are_rejected_not_selected_nondeterministically(monkeypatch, caplog):
+    points = [
+        SimpleNamespace(name="v1", load=lambda: FakeHost),
+        SimpleNamespace(name="v1", load=lambda: FakeHost),
+    ]
+    monkeypatch.setattr(importlib.metadata, "entry_points", lambda group: points)
+    with caplog.at_level(logging.INFO):
+        assert agent_host.load() is False
+    assert agent_host._host is None
+    assert agent_host.feature_flag() == {"state": "failed", "reason": "ambiguous_host"}
+    assert _agent_records(caplog) == ["[agent-event] agent_error reason=ambiguous_host"]
+
+
+def test_start_is_idempotent_and_does_not_spawn_two_hosts(monkeypatch):
+    _entry_points(monkeypatch, {"v1": FakeHost})
+    assert agent_host.load()
+    starts = []
+    host = agent_host._host
+    original = host.start
+
+    def start(**kwargs):
+        starts.append(kwargs)
+        original(**kwargs)
+
+    monkeypatch.setattr(host, "start", start)
+    server = SimpleNamespace(loop=None, send_sync=lambda *args: None)
+    agent_host.start(server, "http", "127.0.0.1", 8188)
+    agent_host.start(server, "http", "127.0.0.1", 8188)
+    assert len(starts) == 1
+
+
+def test_stop_prevents_future_host_start(monkeypatch):
+    _entry_points(monkeypatch, {"v1": FakeHost})
+    assert agent_host.load()
+    server = SimpleNamespace(loop=None, send_sync=lambda *args: None)
+    agent_host.stop()
+    agent_host.start(server, "http", "127.0.0.1", 8188)
+    assert agent_host._host.started is None
+
+
+def test_executor_rejection_fails_host_gracefully(monkeypatch):
+    _entry_points(monkeypatch, {"v1": FakeHost})
+    assert agent_host.load()
+
+    class ClosedLoop:
+        def run_in_executor(self, executor, callback):
+            raise RuntimeError("Executor shutdown")
+        def is_closed(self):
+            return False
+
+    sent = []
+    server = SimpleNamespace(
+        loop=ClosedLoop(),
+        send_sync=lambda event, data: sent.append((event, data)),
+    )
+    agent_host.start(server, "http", "127.0.0.1", 8188)
+    assert agent_host._host.started is None
+    assert agent_host.feature_flag() == {"state": "failed", "reason": "spawn_failed"}
+    assert sent == [("agent_status", {"state": "failed", "reason": "spawn_failed"})]
