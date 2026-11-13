@@ -70,6 +70,21 @@ Run from the repository root in another terminal:
 python script_examples/check_native_agent.py --wait-seconds 90
 ```
 
+For a stricter **authenticated** readiness check, supply the token securely
+through `COMFY_AGENT_PROBE_TOKEN` (never as a command-line argument) and run:
+
+```bash
+python script_examples/check_native_agent.py --wait-seconds 90 --require-authenticated
+```
+
+Use `--auth-header X-API-KEY` when the connected local session authenticates
+with an API key rather than `Authorization: Bearer`. The probe never prints
+the token or stores it in a file. The authenticated check requires an actual
+`GET /api/agent/identity` HTTP 200 response with `user_id`. It also refuses
+to send credentials to a non-loopback endpoint unless the operator supplies
+both an HTTPS URL and `--allow-remote`. Do not use this flag with an
+untrusted server; it intentionally enables credential transmission.
+
 The checker reads only the server's `GET /features` response, then performs
 an unauthenticated `GET /api/agent/identity` to verify the proxy is mounted.
 It reports `ready` if the flag is ready and the identity route returns
@@ -102,9 +117,12 @@ status callbacks, late events during shutdown, a closed asyncio event loop,
 and malformed provider status data. The probe is additional, not a second
 agent runtime.
 
-GitHub Actions also checks that the published `comfy-agent==0.1.0rc8` wheel
-still exposes `comfyui.agent` protocol `v1`, with the expected host methods.
-This is a **package contract smoke test**, not a browser/GPU end-to-end test.
+GitHub Actions checks that the published `comfy-agent==0.1.0rc8` wheel
+still exposes `comfyui.agent` protocol `v1` and passes `pip check`. It also
+starts the **actual fork** with the matching `go-nonfree` extra on CPU, probes
+the same-origin identity endpoint, checks the installed frontend and verifies
+that no duplicate Chat Automation extension is loaded. These tests validate
+bootstrap and integration, **not** signed-in browser turns or GPU generation.
 
 ## Recommended user journey
 
@@ -129,7 +147,10 @@ independent set of copied API graphs.
 | P0 | Package may emit callbacks after ComfyUI shutdown | `stop()` fences new events and status sender guards closed asyncio loops and shutdown races |
 | P1 | An invalid status payload from a broken wheel could silently enter frontend flags | Invalid states are normalized to a failed/unknown feature state |
 | P1 | An unrelated HTML fallback could respond 200 to the identity probe | The probe requires the documented `user_id` JSON shape for HTTP 200 |
-| P1 | Pinned frontend and optional local wheel compatibility was not tested | CI now validates the published wheel host protocol separately from mock tests |
+| P1 | Pinned frontend and optional local wheel compatibility was not tested | CI checks the published wheel host protocol and tests a real CPU fork startup |
+| P1 | Multiple `comfyui.agent` v1 entry points could be selected unpredictably | Fail closed with `ambiguous_host`, require operator to remove conflicting installs |
+| P1 | Duplicate or late startup callbacks could spawn multiple Agent children | Only the first start may schedule work; executor scheduling errors publish `spawn_failed` |
+| P1 | A 401/403 identity response is insufficient proof that an authenticated user is ready | Opt-in environment-token probe requires HTTP 200 and the documented `user_id` shape |
 
 These changes are in `app/agent_host.py`, its existing test suite and the
 small native probe. **No change is made to the official Agent Panel UI bundle,
@@ -160,7 +181,8 @@ operational requirements unless explicitly supported by a future agent API.
 ## Production acceptance checklist
 
 - Confirm local `comfy-agent` wheel, `agent.state=ready` and same-origin
-  authenticated routes on the actual target OS/architecture.
+  authenticated routes on the actual target OS/architecture. Run the
+  `--require-authenticated` probe on loopback with a test account if available.
 - Complete first-party account/workspace consent and verify a real chat turn.
 - Verify live canvas edits, graph validation, model loading and GPU generation.
 - Verify results/outputs and state after refresh, network reconnect and
@@ -177,3 +199,49 @@ operational requirements unless explicitly supported by a future agent API.
 - Official pre-release wheel: https://pypi.org/project/comfy-agent/
 - Agent Panel documentation: https://support.comfy.org/articles/4013072355-comfy-agent
 - External Comfy MCP: https://github.com/Comfy-Org/comfy-mcp
+
+
+## Windows PowerShell verification
+
+```powershell
+python -m pip install --pre -U "comfy-agent[go-nonfree]"
+python -m pip check
+python main.py --enable-agent
+```
+
+In a second PowerShell terminal:
+
+```powershell
+python script_examples/check_native_agent.py --wait-seconds 90
+```
+
+For an authenticated test, set the token using a secure local secret injection
+mechanism instead of entering it into PowerShell history, then run:
+
+```powershell
+python script_examples/check_native_agent.py --require-authenticated --wait-seconds 90
+```
+
+After completing the smoke tests, manually verify sign-in, first-use consent,
+chat follow-ups, model selection, canvas edits, result previews, WebSocket
+reconnections and a ComfyUI restart. These flows are implemented in the
+first-party frontend, not within this repository's small Agent host wrapper.
+
+## Deployment gate and known limits
+
+- The `comfy-agent` runtime is still a vendor **pre-release**. Run the
+  actual wheel on every target OS you intend to support.
+- A CI green check for host readiness or the HTTP identity route does not
+  prove a real account can execute a graph, nor that GPU generation works.
+- `comfyui-frontend-package==1.59.1` is the stable frontend package pinned
+  in this fork. Frontend Agent Panel changes must land in
+  `Comfy-Org/ComfyUI_frontend` or in an authorized fork; this backend PR does
+  not patch the distributed frontend bundle.
+- The official wheel's internal tool registration and runtime logic are not
+  part of the public host v1 interface. Do not monkeypatch undocumented
+  internal endpoints, storage or WebSocket frames.
+- Do not expose `/prompt`, `/queue`, `/upload`, `/api/agent` or other
+  ComfyUI routes on an unauthenticated public interface. Keep ComfyUI bound
+  to loopback or behind a correctly configured authentication proxy.
+- No production readiness claim is made until actual GPU/browser UAT,
+  account-level permissions, model licensing and recovery tests pass.
