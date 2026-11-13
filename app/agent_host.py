@@ -146,6 +146,8 @@ def start(server, scheme: str, address: str, port: int) -> None:
                 logging.debug("Agent status event dropped during ComfyUI shutdown.")
                 return
             last_sent = flag
+            if isinstance(flag, dict):
+                emit_event("agent_state_changed", state=flag.get("state"), reason=flag.get("reason"))
 
     def run():
         global _failure
