@@ -492,3 +492,20 @@ def test_repeated_load_reuses_existing_host_instead_of_constructing_new_one(monk
     assert agent_host.load() is True
     assert len(constructions) == 1
     assert agent_host._host is constructions[0]
+
+
+def test_native_agent_state_transition_logging_is_deduplicated(monkeypatch, caplog):
+    _entry_points(monkeypatch, {"v1": FakeHost})
+    assert agent_host.load()
+    sent = []
+    agent_host.start(
+        SimpleNamespace(loop=None, send_sync=lambda event, data: sent.append((event, data))),
+        "http", "127.0.0.1", 8188,
+    )
+    host = agent_host._host
+    host.state = {"state": "ready", "reason": None}
+    with caplog.at_level(logging.INFO):
+        host.on_change()
+        host.on_change()
+    assert sent == [("agent_status", {"state": "ready"})]
+    assert _agent_records(caplog) == ["[agent-event] agent_state_changed state=ready"]
