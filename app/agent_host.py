@@ -21,6 +21,7 @@ from __future__ import annotations
 import importlib.metadata
 import logging
 import os
+import threading
 
 import folder_paths
 from comfy_api import feature_flags
@@ -34,6 +35,9 @@ _host = None
 _failure = None
 # feature_flag() can be read on every connection; log a raising status() once.
 _status_logged = False
+# The agent's on_change callback runs on package-managed worker threads.
+_event_lock = threading.Lock()
+_stopping = False
 
 
 def emit_event(event, /, **fields) -> None:
@@ -105,18 +109,30 @@ def start(server, scheme: str, address: str, port: int) -> None:
     host = "127.0.0.1" if address in ("", "0.0.0.0") else "::1" if address == "::" else address
     comfy_url = f"{scheme}://[{host}]:{port}" if ":" in host else f"{scheme}://{host}:{port}"
 
+    global _stopping
+    with _event_lock:
+        _stopping = False
     last_sent = None
 
     def on_change():
-        # Called from the host's threads; last_sent is unsynchronized, so a race
-        # costs at most one duplicate message. The host also reports changes the
-        # published flag doesn't carry (e.g. its restart count), so only send
-        # when the flag itself moves.
+        # The wheel may call from multiple threads. Serialize flag reads and
+        # websocket notifications so an older state cannot overtake a newer one.
         nonlocal last_sent
-        flag = _publish_flag()
-        if flag != last_sent:
+        with _event_lock:
+            if _stopping:
+                return
+            flag = _publish_flag()
+            if flag == last_sent:
+                return
+            if server.loop is not None and server.loop.is_closed():
+                return
+            try:
+                server.send_sync("agent_status", flag)
+            except RuntimeError:
+                # ComfyUI may close its loop between our guard and send_sync.
+                logging.debug("Agent status event dropped during ComfyUI shutdown.")
+                return
             last_sent = flag
-            server.send_sync("agent_status", flag)
 
     def run():
         global _failure
@@ -136,6 +152,9 @@ def start(server, scheme: str, address: str, port: int) -> None:
 
 
 def stop() -> None:
+    global _stopping
+    with _event_lock:
+        _stopping = True
     if _host is not None:
         try:
             _host.stop()
@@ -162,6 +181,8 @@ def feature_flag():
         return _failure
     try:
         status = _host.status()
+        if not isinstance(status, dict) or status.get("state") not in ("starting", "ready", "failed"):
+            raise ValueError("Invalid comfy-agent host status")
         flag = {"state": status["state"]}
         if status.get("reason"):
             flag["reason"] = status["reason"]
