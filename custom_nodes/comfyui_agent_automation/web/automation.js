@@ -10,6 +10,14 @@ app.registerExtension({
       "#comfy-automation-launcher{position:fixed;bottom:22px;right:22px;z-index:10050;background:#3269c9;color:#fff;border:0;border-radius:99px;padding:12px 17px;cursor:pointer;font-weight:700;box-shadow:0 6px 20px #0005}",
       "#comfy-automation-panel{position:fixed;bottom:76px;right:22px;z-index:10050;width:min(420px,calc(100vw - 28px));height:min(640px,calc(100vh - 100px));display:none;flex-direction:column;background:#191b21;color:#eee;border:1px solid #51545e;border-radius:14px;box-shadow:0 14px 45px #0008;font:14px system-ui,sans-serif}",
       "#comfy-automation-panel button{cursor:pointer;border-radius:7px;padding:7px 11px;background:#3269c9;color:white;border:0}",
+      "#comfy-automation-panel.comfy-automation-sidebar{position:relative;inset:auto;width:100%;height:100%;max-width:none;max-height:none;border:0;border-radius:0;box-shadow:none;display:flex;min-height:0}",
+      "#comfy-automation-panel.comfy-automation-sidebar #comfy-automation-header button{display:none}",
+      "#comfy-automation-panel .comfy-automation-field{display:flex;flex-direction:column;gap:4px;margin:8px 0}",
+      "#comfy-automation-panel .comfy-automation-plan{background:#252a35;border:1px solid #445171;padding:10px;border-radius:10px}",
+      "#comfy-automation-panel .comfy-automation-plan label{font-size:12px;color:#c4cede}",
+      "#comfy-automation-panel .comfy-automation-plan input,#comfy-automation-panel .comfy-automation-plan select,#comfy-automation-panel .comfy-automation-plan textarea{width:100%;box-sizing:border-box}",
+      "#comfy-automation-panel button.comfy-automation-secondary{background:#3d424b}",
+
       "#comfy-automation-panel button:disabled{opacity:.5;cursor:not-allowed}",
       "#comfy-automation-panel input,#comfy-automation-panel select,#comfy-automation-panel textarea{color:#eee;background:#292d36;border:1px solid #51545e;border-radius:6px;padding:7px;min-width:0}",
       "#comfy-automation-panel textarea{resize:vertical;min-height:58px;width:100%;box-sizing:border-box}",
@@ -34,12 +42,12 @@ app.registerExtension({
       return node;
     };
 
-    const launcher = el("button", { id: "comfy-automation-launcher", text: "⚡ Chat Automation" }, document.body);
+    const launcher = el("button", { id: "comfy-automation-launcher", text: "⚡ Automation" }, document.body);
     const panel = el("section", { id: "comfy-automation-panel" }, document.body);
     panel.setAttribute("aria-label", "ComfyUI workflow automation");
 
     const header = el("div", { id: "comfy-automation-header" }, panel);
-    const heading = el("strong", { text: "Chat Agent · Workflow" }, header);
+    const heading = el("strong", { text: "Automation · Workflow có kiểm soát" }, header);
     heading.style.flex = "1";
     const close = el("button", { text: "×", title: "Đóng" }, header);
 
@@ -55,6 +63,10 @@ app.registerExtension({
     const count = el("input", { type: "number", min: "1", max: "8", step: "1", value: "", placeholder: "Mặc định / AI chọn" }, countRow);
     count.setAttribute("aria-label", "Batch count");
 
+    const checkpoint = el("select", {}, controls);
+    checkpoint.setAttribute("aria-label", "Checkpoint đang cài đặt");
+    el("option", { value: "", text: "Tự chọn khi có một checkpoint" }, checkpoint);
+
     const messages = el("div", { id: "comfy-automation-messages" }, panel);
     messages.setAttribute("role", "log");
     messages.setAttribute("aria-live", "polite");
@@ -67,6 +79,8 @@ app.registerExtension({
     let sessionId = null;
     let currentConfirm = null;
     let llmConfigured = false;
+    let workflowCatalog = [];
+    let installedCheckpoints = [];
     const pollTimers = new Map();
 
     const message = (text, isUser = false) => {
@@ -105,11 +119,22 @@ app.registerExtension({
       try {
         const data = await api("/workflows");
         llmConfigured = data.llm_configured;
+        workflowCatalog = data.workflows;
+        installedCheckpoints = data.checkpoints || [];
         workflow.replaceChildren();
         el("option", { value: "", text: "Tự động chọn workflow" }, workflow);
         for (const item of data.workflows) el("option", { value: item.id, text: item.name }, workflow);
-        message("Đã tải " + data.workflows.length + " workflow. " +
-          (data.llm_configured ? "LLM planner đã cấu hình." : "Chế độ không LLM: chọn workflow hoặc dùng mẫu duy nhất."));
+        checkpoint.replaceChildren();
+        el("option", { value: "", text: installedCheckpoints.length > 1 ?
+          "Chọn checkpoint (bắt buộc khi có nhiều model)" : "Tự chọn khi có một checkpoint" }, checkpoint);
+        for (const modelName of installedCheckpoints) {
+          el("option", { value: modelName, text: modelName }, checkpoint);
+        }
+        message("Có " + data.workflows.length + " workflow được duyệt và " +
+          installedCheckpoints.length + " checkpoint đã cài." +
+          (data.llm_configuration_error ? " Cấu hình LLM chưa đủ URL và model." :
+          (data.llm_configured ? " AI planner đã sẵn sàng." :
+          " Chế độ không LLM: tin nhắn sẽ được dùng như prompt.")));
       } catch (error) {
         message("Không tải được workflow: " + error.message);
       } finally { setBusy(false); }
@@ -186,6 +211,143 @@ app.registerExtension({
       }
     }
 
+    function showPlan(proposal) {
+      let active = proposal;
+      let dirty = false;
+      const definition = workflowCatalog.find((item) => item.id === active.plan.workflow_id);
+      const wrapper = el("div", { className: "comfy-automation-plan" }, messages);
+      el("strong", { text: "Kế hoạch cần xác nhận" }, wrapper);
+      el("div", { text: "Workflow: " +
+        (definition?.name || active.plan.workflow_id) }, wrapper);
+      el("div", { text: "Chỉ chạy workflow mẫu đã duyệt, không tự sửa canvas đang mở." }, wrapper);
+
+      const editor = el("div", {}, wrapper);
+      const inputs = [];
+      let save;
+      let confirm;
+      const markDirty = () => {
+        dirty = true;
+        if (save) save.disabled = false;
+        if (confirm) confirm.disabled = true;
+      };
+      const addField = (key, spec) => {
+        const container = el("div", { className: "comfy-automation-field" }, editor);
+        el("label", { text: key + (spec.description ? " — " + spec.description : "") }, container);
+        const previous = active.plan.parameters[key];
+        let control;
+        if (spec.source === "checkpoints") {
+          control = el("select", {}, container);
+          el("option", { value: "", text: "Chọn checkpoint..." }, control);
+          for (const value of installedCheckpoints) {
+            el("option", { value, text: value }, control);
+          }
+          control.value = previous ?? "";
+        } else if (spec.type === "boolean") {
+          control = el("input", { type: "checkbox", checked: previous ?? false }, container);
+        } else if (spec.type === "string" && ["prompt", "negative_prompt"].includes(key)) {
+          control = el("textarea", { value: previous ?? "", rows: 3 }, container);
+        } else if (spec.type === "integer" || spec.type === "number") {
+          control = el("input", {
+            type: "number",
+            value: previous === undefined ? "" : String(previous),
+            ...(spec.min === undefined ? {} : { min: String(spec.min) }),
+            ...(spec.max === undefined ? {} : { max: String(spec.max) }),
+            step: String(spec.multiple_of || (spec.type === "integer" ? 1 : "any")),
+            placeholder: "Giữ mặc định trong workflow",
+          }, container);
+        } else {
+          control = el("input", { type: "text", value: previous ?? "", placeholder: "Giữ mặc định" }, container);
+        }
+        control.addEventListener("input", markDirty);
+        inputs.push({ key, spec, control, hadValue: previous !== undefined });
+      };
+
+      for (const [key, spec] of Object.entries(definition?.inputs || {})) addField(key, spec);
+      const countField = el("div", { className: "comfy-automation-field" }, editor);
+      el("label", { text: "Số tác vụ" }, countField);
+      const batch = el("input", {
+        type: "number", min: "1", max: "8", step: "1",
+        value: String(active.plan.count),
+      }, countField);
+      batch.addEventListener("input", markDirty);
+      const actions = el("div", { className: "comfy-automation-row" }, wrapper);
+      save = el("button", { text: "Lưu chỉnh sửa", className: "comfy-automation-secondary", disabled: true }, actions);
+      confirm = el("button", { text: "Xác nhận chạy" }, actions);
+      currentConfirm = confirm;
+
+      const needModel = () =>
+        installedCheckpoints.length > 1 && definition?.inputs?.checkpoint &&
+        !active.plan.parameters.checkpoint;
+      if (needModel()) {
+        confirm.disabled = true;
+        el("div", { text: "Có nhiều checkpoint; cần chọn model rồi lưu trước khi chạy." }, wrapper);
+      }
+
+      save.addEventListener("click", async () => {
+        if (!dirty) return;
+        const parameters = {};
+        for (const { key, spec, control, hadValue } of inputs) {
+          if (spec.type === "boolean") {
+            if (hadValue || control.checked) parameters[key] = control.checked;
+          } else if (spec.type === "integer" || spec.type === "number") {
+            if (control.value.trim()) {
+              const value = Number(control.value);
+              if (!Number.isFinite(value) ||
+                  (spec.type === "integer" && !Number.isInteger(value))) {
+                message("Tham số " + key + " không phải số hợp lệ.");
+                return;
+              }
+              parameters[key] = value;
+            }
+          } else if (control.value.trim()) {
+            parameters[key] = control.value;
+          }
+        }
+        const countValue = Number(batch.value);
+        if (!Number.isInteger(countValue) || countValue < 1 || countValue > 8) {
+          message("Số tác vụ phải từ 1 đến 8.");
+          return;
+        }
+        save.disabled = true;
+        try {
+          active = await api("/plans/" + encodeURIComponent(active.plan_id) + "/revise", "POST", {
+            parameters, count: countValue,
+          });
+          dirty = false;
+          confirm.disabled = needModel();
+          message("Đã lưu phiên bản kế hoạch mới; bản cũ không còn được xác nhận.");
+        } catch (error) {
+          message("Không lưu được chỉnh sửa: " + error.message);
+          if (error.status !== 409) save.disabled = false;
+        }
+      });
+
+      confirm.addEventListener("click", async () => {
+        if (dirty) {
+          message("Cần lưu các thay đổi trước khi chạy.");
+          return;
+        }
+        confirm.disabled = true;
+        try {
+          const run = await api("/runs", "POST", { plan_id: active.plan_id });
+          message(run.dispatch_error ? "Lần dispatch trước gặp lỗi; kiểm tra Run ID." :
+            (run.replayed ? "Dùng lại tác vụ đã xác nhận; không xếp trùng." :
+              "Đã gửi tác vụ vào hàng đợi ComfyUI."));
+          save.disabled = true;
+          await followRun(run.run_id);
+        } catch (error) {
+          message("Không chạy được: " + error.message);
+          if (error.detail?.run_id) {
+            message("Kiểm tra trạng thái tác vụ sau lỗi dispatch.");
+            await followRun(error.detail.run_id);
+          } else if (![400, 409].includes(error.status)) {
+            confirm.disabled = false;
+          }
+        }
+      });
+      messages.scrollTop = messages.scrollHeight;
+    }
+
     send.addEventListener("click", async () => {
       if (busy || !prompt.value.trim()) return;
       const hasBatch = count.value.trim() !== "";
@@ -196,48 +358,30 @@ app.registerExtension({
       }
       const userText = prompt.value.trim();
       message(userText, true);
+      const indicator = message("Đang lập kế hoạch từ yêu cầu...");
       setBusy(true);
       try {
         const data = await api("/chat", "POST", {
           message: userText,
           ...(hasBatch ? { count: batch } : {}),
+          ...(checkpoint.value ? { checkpoint: checkpoint.value } : {}),
           ...(sessionId ? { session_id: sessionId } : {}),
           ...(workflow.value ? { workflow_id: workflow.value } : {}),
         });
         sessionId = data.session_id;
         if (currentConfirm) currentConfirm.disabled = true;
-        message("Kế hoạch đề xuất (hết hạn sau " + Math.round(data.expires_in_seconds / 60) +
-          " phút):\n" + JSON.stringify(data.plan, null, 2));
+        indicator.textContent = "Kế hoạch đã sẵn sàng. Vui lòng kiểm tra thông số:";
+        showPlan(data);
         message(llmConfigured ?
-          "Có thể gửi tiếp yêu cầu chỉnh sửa. Agent dùng ngữ cảnh kế hoạch trước để lập kế hoạch mới." :
-          "Chế độ không LLM: tin nhắn tiếp theo là prompt mới, không tự suy luận các chỉ dẫn chỉnh sửa.");
-        const confirm = el("button", { text: "✓ Xác nhận chạy" }, messages);
-        currentConfirm = confirm;
-        confirm.addEventListener("click", async () => {
-          confirm.disabled = true;
-          try {
-            const run = await api("/runs", "POST", { plan_id: data.plan_id });
-            message(run.dispatch_error ? "Lần dispatch trước gặp lỗi; hãy kiểm tra trạng thái Run ID." :
-              (run.replayed ? "Tác vụ đã được xếp hàng trước đó; dùng lại Run ID." :
-              "Đã xác nhận và đưa vào hàng đợi."));
-            await followRun(run.run_id);
-          } catch (error) {
-            message("Không chạy được: " + error.message);
-            if (error.detail?.run_id) {
-              message("Tác vụ có thể đã được nhận; kiểm tra Run ID: " + error.detail.run_id);
-              await followRun(error.detail.run_id);
-            } else if (error.status !== 409 && error.status !== 400) {
-              confirm.disabled = false;
-            }
-          }
-        });
+          "Gửi tiếp tin nhắn để AI đề xuất thay đổi; hoặc sửa trực tiếp trên biểu mẫu kế hoạch." :
+          "Chế độ không LLM: sửa trực tiếp trên biểu mẫu hoặc gửi prompt mới.");
         prompt.value = "";
       } catch (error) {
+        indicator.textContent = "Không lập được kế hoạch: " + error.message;
         if (error.status === 404 && sessionId) {
           sessionId = null;
-          message("Phiên chat cũ đã hết hạn. Gửi lại yêu cầu để tạo phiên mới.");
+          message("Phiên chat đã hết hạn; gửi lại để tạo phiên mới.");
         }
-        message("Không lập được kế hoạch: " + error.message);
       } finally { setBusy(false); }
     });
 
@@ -250,6 +394,37 @@ app.registerExtension({
         send.click();
       }
     });
+    // Prefer ComfyUI's native sidebar contract over a fixed overlay. The
+    // floating launcher remains only as a fallback for older frontend builds.
+    if (typeof app.extensionManager?.registerSidebarTab === "function") {
+      try {
+        app.extensionManager.registerSidebarTab({
+          id: "comfyui.automation",
+          title: "Automation",
+          tooltip: "Chạy workflow đã duyệt; không thay thế Comfy Agent",
+          icon: "pi pi-bolt",
+          type: "custom",
+          render(container) {
+            panel.classList.add("comfy-automation-sidebar");
+            container.appendChild(panel);
+            panel.style.display = "flex";
+            launcher.hidden = true;
+          },
+          destroy() {
+            for (const timer of pollTimers.values()) {
+              if (timer !== true) clearInterval(timer);
+            }
+            pollTimers.clear();
+            panel.remove();
+            launcher.hidden = false;
+          },
+        });
+        launcher.hidden = true;
+      } catch (error) {
+        message("Không đăng ký được sidebar, sử dụng bảng chat nổi: " + error.message);
+      }
+    }
+
     message("Nhập token, tải workflow và trò chuyện nhiều lượt để tinh chỉnh kế hoạch. " +
       "Mỗi lượt chạy phải được xác nhận. Phiên hội thoại chỉ lưu trong bộ nhớ server.");
   },

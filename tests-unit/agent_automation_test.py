@@ -47,7 +47,7 @@ def test_build_graphs_isolated_and_seed_advances(registry):
         "workflow_id": "image",
         "parameters": {"prompt": "Sunset", "seed": 14},
         "count": 3,
-    }, checkpoints=["z.safetensors", "a.safetensors"])
+    }, checkpoints=["a.safetensors"])
     assert [x["3"]["inputs"]["seed"] for x in graphs] == [14, 15, 16]
     assert all(x["6"]["inputs"]["text"] == "Sunset" for x in graphs)
     assert all(x["4"]["inputs"]["ckpt_name"] == "a.safetensors" for x in graphs)
@@ -143,3 +143,32 @@ def test_invalid_multiple_of_and_choice_types_rejected(registry):
     assert registry.validate_plan({
         "workflow_id": "image", "parameters": {"seed": 4},
     })["parameters"]["seed"] == 4
+
+
+
+def test_multiple_checkpoints_require_explicit_selection(tmp_path):
+    manifest = {
+        "id": "model-choice",
+        "name": "Model choice",
+        "description": "Must select installed checkpoint",
+        "inputs": {
+            "checkpoint": {
+                "node_id": "4", "field": "ckpt_name", "type": "string", "source": "checkpoints",
+            },
+        },
+    }
+    graph = {"4": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "__AUTO_CHECKPOINT__"}}}
+    (tmp_path / "model-choice.json").write_text(json.dumps(manifest))
+    (tmp_path / "model-choice.api.json").write_text(json.dumps(graph))
+    registry = engine.Registry(tmp_path)
+    models = ["a.safetensors", "b.safetensors"]
+    plan = {"workflow_id": "model-choice", "parameters": {}, "count": 1}
+    with pytest.raises(engine.PlanError, match="select one explicitly"):
+        registry.build_graphs(plan, checkpoints=models)
+    plan["parameters"] = {"checkpoint": "b.safetensors"}
+    generated = registry.build_graphs(plan, checkpoints=models)
+    assert generated[0]["4"]["inputs"]["ckpt_name"] == "b.safetensors"
+    plan["parameters"] = {"checkpoint": "missing.safetensors"}
+    with pytest.raises(engine.PlanError, match="not installed"):
+        registry.build_graphs(plan, checkpoints=models)
+    assert registry.list()[0]["inputs"]["checkpoint"]["source"] == "checkpoints"

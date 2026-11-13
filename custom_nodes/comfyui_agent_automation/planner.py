@@ -31,6 +31,8 @@ async def create_plan(
 
     model = os.environ.get("COMFY_AUTOMATION_LLM_MODEL", "").strip()
     endpoint = os.environ.get("COMFY_AUTOMATION_LLM_URL", "").strip()
+    if bool(model) != bool(endpoint):
+        raise PlanError("Both COMFY_AUTOMATION_LLM_MODEL and COMFY_AUTOMATION_LLM_URL are required")
     if model and endpoint:
         parts = urlsplit(endpoint)
         if parts.scheme not in ("https", "http") or not parts.hostname or parts.username or parts.password:

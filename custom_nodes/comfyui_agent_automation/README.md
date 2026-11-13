@@ -7,7 +7,10 @@ Neither the model engine nor the built-in /prompt routes are modified.
 
 ## Features
 
-- Chat panel appears at the bottom-right of the ComfyUI frontend.
+- Automation registers as a **native ComfyUI sidebar tab** when supported by
+  the frontend. Older frontends get the original floating launcher as fallback.
+  It is separate from the official Comfy Agent panel: it does not claim to
+  mutate or save the active canvas graph.
 - Use an OpenAI-compatible LLM to plan work from natural language, or select
   a registered workflow and use free-text prompting without an LLM.
 - Plans reference only trusted local templates. No prompt can upload Python,
@@ -18,10 +21,19 @@ Neither the model engine nor the built-in /prompt routes are modified.
 - Supports a batch of 1 to 8 jobs with sequential seeds.
 - Supports bounded multi-turn conversation context: last 12 messages, sessions
   expire after 60 minutes of inactivity (maximum 64 active sessions).
+- Users can inspect and edit declared parameters and batch size in the panel,
+  then explicitly save a new plan revision before confirmation. Saving
+  invalidates the older unconfirmed plan ID; no raw graph is submitted.
+- Templates may declare a dynamic `checkpoints` source. The model selector
+  shows actual installed checkpoints; if there is more than one, automatic
+  alphabetical selection is **forbidden**. The user must choose a model.
 - Plans are pinned to SHA-256 of the trusted manifest and API graph. An edit
   after planning blocks execution until the user creates a fresh plan.
 - Confirmation is idempotent: retrying the same plan ID returns the existing
   run ID and does not enqueue duplicate jobs.
+- Messages in one session are serialized; two simultaneous chat requests cannot
+  overwrite the session history. Queue admission is checked again after async
+  ComfyUI validation, since native clients may enqueue in the meantime.
 - Queue admission limit: total running + pending ComfyUI jobs + new jobs
   must not exceed 32. There can be at most 128 pending plans and 256 runs
   tracked by this host.
@@ -74,6 +86,9 @@ is allowed, for example:
 
 The LLM sends only the message and the allowed workflow descriptions to the
 configured provider. It never sends source images or complete workflow graphs.
+If only one of COMFY_AUTOMATION_LLM_MODEL or COMFY_AUTOMATION_LLM_URL is set,
+planning returns a clear error instead of silently switching to local mode.
+
 Without an LLM, select a workflow in the UI: the message is inserted into its
 declared prompt field. When exactly one workflow exists, selection is optional.
 Without an LLM, chat history remains available to the server but **natural
@@ -92,7 +107,9 @@ is required for each workflow:
 - ID.api.json: ComfyUI API-format workflow graph exported via the UI.
 
 The included text-to-image is a starter template derived from core node
-types and uses the first checkpoint in ComfyUI's checkpoint directory. Review
+types. It auto-selects an installed checkpoint only when exactly **one**
+checkpoint exists. With multiple installed checkpoints the user must select
+a specific checkpoint from the Chat Automation panel. Review
 the API graph and replace __AUTO_CHECKPOINT__ with a specific installed
 checkpoint when production consistency matters. Models, precision, memory and
 node compatibility still depend on the local installation.
@@ -111,12 +128,16 @@ token is not configured, requests fail closed with HTTP 503.
 | --- | --- | --- |
 | GET | /comfy-automation/v1/workflows | Approved workflow list |
 | GET | /comfy-automation/v1/openapi.json | OpenAPI 3.1 contract for external agent tool adapters |
-| POST | /comfy-automation/v1/chat | Plan from message, optional workflow_id |
+| POST | /comfy-automation/v1/chat | Plan from message, optional workflow_id, session_id, checkpoint and count |
+| POST | /comfy-automation/v1/plans/{plan_id}/revise | Edit typed scalar inputs and/or batch size; returns a fresh plan ID without executing |
 | POST | /comfy-automation/v1/runs | Confirm and queue a previously returned plan_id |
 | GET | /comfy-automation/v1/runs/{run_id} | Per-job state and output metadata |
 | POST | /comfy-automation/v1/runs/{run_id}/cancel | Cancel only this run |
 
-Plans expire after 15 minutes. They may execute only once, but repeated
+Plans expire after 15 minutes. After `/plans/{plan_id}/revise`, the old
+unconfirmed plan ID is invalidated, and the replacement has a new 15-minute
+approval window. Revision parameters are a full replacement set of approved
+scalar values, not an incremental patch. They may execute only once, but repeated
 confirmation calls are safe and return the existing run ID (HTTP 200
 instead of 201). After template changes, confirmation returns HTTP 409 and
 requires re-planning. Chat requests cannot
@@ -220,3 +241,29 @@ compatibility, multi-user tenancy and GPU generation require separate testing.
 
 The code is a hardened local-first integration but still requires real
 GPU/runtime validation before production sign-off.
+
+## Interaction acceptance criteria
+
+1. The frontend registers the Automation tab in ComfyUI's native sidebar
+   when `registerSidebarTab` is available; fallback launcher is used only
+   on unsupported frontend builds.
+2. Chat proposals are independent of the active graph. Users must not be
+   led to believe a chat edits canvas nodes; first-party Comfy Agent is the
+   preferred tool for approved graph editing.
+3. The panel loads registered templates, installed checkpoints and input
+   constraints directly from the host, not a hard-coded list of models.
+4. The user can inspect and modify plan parameters without another LLM call.
+   Changes stay local to the form until `Lưu chỉnh sửa` is explicitly used.
+   Confirmation of unsaved edits is disabled.
+5. Multiple checkpoints never silently select an arbitrary file. Uninstalled
+   or unsupported selections are rejected by the host before queueing.
+6. Concurrent requests in the same chat session maintain a consistent order
+   and cannot replace each other's context.
+7. Submission rechecks native queue capacity after node validation and
+   never removes unrelated jobs during error compensation.
+8. Repeated confirmation with the same plan ID never creates duplicate jobs.
+9. Only the workflows and typed scalar parameters declared in the trusted
+   manifest may be controlled. No shell, arbitrary graph edits or paid
+   ComfyUI API nodes are exposed through Automation.
+10. Real GPU output and visual UI/browser acceptance remain environment
+    dependent and are not claimed as passing based on CPU-only tests.

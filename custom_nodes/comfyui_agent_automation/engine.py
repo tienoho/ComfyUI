@@ -69,6 +69,8 @@ class Registry:
                 raise PlanError("Workflow input must target a node and field")
             if spec.get("type") not in ("string", "integer", "number", "boolean"):
                 raise PlanError("Unsupported editable input type")
+            if "source" in spec and (spec["source"] != "checkpoints" or spec["type"] != "string"):
+                raise PlanError("Unsupported dynamic input source")
             if "multiple_of" in spec and (type(spec["multiple_of"]) is not int or spec["multiple_of"] <= 0):
                 raise PlanError("Invalid input multiple_of")
             if "choices" in spec and (not isinstance(spec["choices"], list) or not spec["choices"]):
@@ -88,8 +90,13 @@ class Registry:
                 "id": manifest["id"],
                 "name": manifest["name"],
                 "description": manifest["description"],
-                "inputs": {k: {"type": v["type"], "description": v.get("description", "")}
-                           for k, v in manifest["inputs"].items()},
+                "inputs": {k: {
+                    "type": v["type"],
+                    "description": v.get("description", ""),
+                    **{field: v[field] for field in (
+                        "source", "min", "max", "max_length", "multiple_of", "choices"
+                    ) if field in v},
+                } for k, v in manifest["inputs"].items()},
             })
         return items
 
@@ -158,21 +165,31 @@ class Registry:
             if isinstance(node["inputs"][spec["field"]], list):
                 raise PlanError("Editable inputs cannot overwrite node connections")
 
+        installed = set(checkpoints or [])
+        for key, value in plan["parameters"].items():
+            spec = manifest["inputs"][key]
+            if spec.get("source") == "checkpoints" and value not in installed:
+                raise PlanError("Selected checkpoint is not installed")
+
         graphs = []
         for index in range(plan["count"]):
             graph = copy.deepcopy(original)
+            # Apply all user-approved parameters before attempting any default
+            # model selection. An explicit checkpoint must override the sentinel.
+            for key, value in plan["parameters"].items():
+                spec = manifest["inputs"][key]
+                graph[spec["node_id"]]["inputs"][spec["field"]] = value
             for node in graph.values():
                 if isinstance(node, dict) and isinstance(node.get("inputs"), dict):
                     for field, value in node["inputs"].items():
                         if field == "ckpt_name" and value == "__AUTO_CHECKPOINT__":
-                            if not checkpoints:
-                                raise PlanError("No checkpoint installed; configure the workflow model")
-                            node["inputs"][field] = sorted(checkpoints)[0]
-            for key, value in plan["parameters"].items():
-                spec = manifest["inputs"][key]
-                graph[spec["node_id"]]["inputs"][spec["field"]] = value
-            # Vary the seed for batch images while preserving an explicit seed
-            # when a single item is requested.
+                            if not installed:
+                                raise PlanError("No checkpoint installed; install a compatible model")
+                            if len(installed) != 1:
+                                raise PlanError("More than one checkpoint is installed; select one explicitly")
+                            node["inputs"][field] = next(iter(installed))
+            # Vary only the declared numeric seed; other widget values and graph
+            # connections are identical across the batch.
             if plan["count"] > 1 and "seed" in manifest["inputs"]:
                 spec = manifest["inputs"]["seed"]
                 node_input = graph[spec["node_id"]]["inputs"]

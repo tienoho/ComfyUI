@@ -2,7 +2,7 @@
   "openapi": "3.1.0",
   "info": {
     "title": "ComfyUI Chat Automation API",
-    "version": "0.2.0",
+    "version": "0.3.0",
     "description": "Human-approved local workflow automation adapter. The API complements the official comfy-agent host and comfy-mcp; it does not replace or automatically register tools in either system."
   },
   "servers": [
@@ -33,7 +33,7 @@
         "tags": [
           "Discovery"
         ],
-        "summary": "Discover approved workflows and editable inputs",
+        "summary": "List registered workflows, editable parameter constraints and installed checkpoint filenames",
         "responses": {
           "200": {
             "description": "Allowlisted workflow catalog"
@@ -50,7 +50,7 @@
         "tags": [
           "Planning"
         ],
-        "summary": "Create a reviewable workflow plan, no execution",
+        "summary": "Propose an approved workflow plan with optional session context and explicit checkpoint choice",
         "requestBody": {
           "required": true,
           "content": {
@@ -78,6 +78,10 @@
                     "type": "integer",
                     "minimum": 1,
                     "maximum": 8
+                  },
+                  "checkpoint": {
+                    "type": "string",
+                    "description": "Installed checkpoint filename chosen by user; overrides LLM model selection"
                   }
                 }
               }
@@ -211,6 +215,61 @@
         "responses": {
           "200": {
             "description": "OpenAPI 3.1 schema"
+          }
+        }
+      }
+    },
+    "/comfy-automation/v1/plans/{plan_id}/revise": {
+      "post": {
+        "operationId": "reviseWorkflowPlan",
+        "tags": [
+          "Planning"
+        ],
+        "summary": "Revise scalar inputs or batch count, invalidating the old unconfirmed plan ID",
+        "description": "Changes are confined to declared typed inputs. Takes a FULL parameter set, not a patch. It never mutates or executes a graph. Original plan ID is invalidated.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "plan_id",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                  "parameters": {
+                    "type": "object",
+                    "description": "Full replacement set of approved scalar values"
+                  },
+                  "count": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 8
+                  }
+                },
+                "minProperties": 1
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Revised plan ID with same template revision"
+          },
+          "400": {
+            "description": "Invalid or undeclared parameter"
+          },
+          "409": {
+            "description": "Expired, confirmed, superseded or changed template"
           }
         }
       }

@@ -50,6 +50,13 @@
       "max": 2048,
       "description": "Chiều cao ảnh (chia hết cho 8)",
       "multiple_of": 8
+    },
+    "checkpoint": {
+      "node_id": "4",
+      "field": "ckpt_name",
+      "type": "string",
+      "source": "checkpoints",
+      "description": "Checkpoint đã cài đặt cho workflow Text-to-Image"
     }
   }
 }

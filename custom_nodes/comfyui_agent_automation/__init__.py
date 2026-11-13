@@ -119,6 +119,7 @@ def _create_session():
         raise web.HTTPTooManyRequests(text="Too many active chat sessions")
     session_id = str(uuid.uuid4())
     _sessions[session_id] = {
+        "lock": asyncio.Lock(),
         "messages": [],
         "previous_plan": None,
         "updated_at": time.monotonic(),
@@ -131,8 +132,11 @@ async def automation_workflows(request):
     _authenticate(request)
     return web.json_response({
         "workflows": _registry.list(),
+        "checkpoints": sorted(folder_paths.get_filename_list("checkpoints"))[:256],
         "llm_configured": bool(os.getenv("COMFY_AUTOMATION_LLM_MODEL") and
                                os.getenv("COMFY_AUTOMATION_LLM_URL")),
+        "llm_configuration_error": bool(os.getenv("COMFY_AUTOMATION_LLM_MODEL")) !=
+                                   bool(os.getenv("COMFY_AUTOMATION_LLM_URL")),
     })
 
 
@@ -148,62 +152,150 @@ async def automation_openapi(request):
 async def automation_chat(request):
     _authenticate(request)
     data = await _read_json(request)
-    if set(data) - {"message", "workflow_id", "session_id", "count"}:
+    if set(data) - {"message", "workflow_id", "session_id", "count", "checkpoint"}:
         raise web.HTTPBadRequest(text="Unsupported request fields")
+    message = data.get("message")
+    if not isinstance(message, str) or not message.strip() or len(message) > 4000:
+        raise web.HTTPBadRequest(text="Message must contain 1-4000 characters")
+    selected_workflow = data.get("workflow_id")
+    if selected_workflow is not None and not isinstance(selected_workflow, str):
+        raise web.HTTPBadRequest(text="Invalid workflow ID")
+    checkpoint = data.get("checkpoint")
+    if checkpoint is not None and (not isinstance(checkpoint, str) or not checkpoint.strip()):
+        raise web.HTTPBadRequest(text="Checkpoint must be a filename")
     requested_count = data.get("count")
     if requested_count is not None and (type(requested_count) is not int or not 1 <= requested_count <= 8):
         raise web.HTTPBadRequest(text="Count must be an integer between 1 and 8")
+
     _cleanup()
-    # A session is optional for backward compatibility with earlier API clients.
+    if len(_pending) >= _MAX_PLANS:
+        raise web.HTTPTooManyRequests(text="Too many unconfirmed plans")
     supplied = data.get("session_id")
     if supplied is None:
         session_id, session = _create_session()
     else:
         session_id, session = supplied, _get_session(supplied)
-    if len(_pending) >= _MAX_PLANS:
-        raise web.HTTPTooManyRequests(text="Too many unconfirmed plans")
 
-    try:
-        # Limit concurrent provider calls and total provider-side spend per host.
-        async with _planner_slots:
-            plan = await create_plan(
-                _registry, data.get("message"), data.get("workflow_id"),
-                history=list(session["messages"]),
-                previous_plan=session["previous_plan"],
-            )
-        if requested_count is not None:
-            plan["count"] = requested_count
+    # Serialize one session's requests, while unrelated sessions may plan in
+    # parallel. This preserves the exact order of history and prior proposals.
+    async with session["lock"]:
+        session["updated_at"] = time.monotonic()
+        try:
+            async with _planner_slots:
+                plan = await create_plan(
+                    _registry, message, selected_workflow,
+                    history=list(session["messages"]),
+                    previous_plan=session["previous_plan"],
+                )
+            if requested_count is not None:
+                plan["count"] = requested_count
+            if checkpoint is not None:
+                plan["parameters"]["checkpoint"] = checkpoint
             plan = _registry.validate_plan(plan)
-        revision = _registry.revision(plan["workflow_id"])
-    except PlanError as error:
-        return _error(error)
+            if checkpoint is not None:
+                # Model selection originates in the client, not the LLM. Use
+                # ComfyUI's actual installed checkpoints as the allowlist.
+                installed = folder_paths.get_filename_list("checkpoints")
+                if checkpoint not in installed:
+                    raise PlanError("Selected checkpoint is not installed")
+            revision = _registry.revision(plan["workflow_id"])
+        except PlanError as error:
+            if supplied is None:
+                _sessions.pop(session_id, None)
+            return _error(error)
 
-    plan_id = str(uuid.uuid4())
-    _pending[plan_id] = {
-        "expires_at": time.monotonic() + _PLAN_TTL,
-        "plan": plan,
-        "revision": revision,
-        "session_id": session_id,
-    }
-    session["messages"].extend([
-        {"role": "user", "content": data["message"]},
-        {"role": "assistant", "content": _plan_summary(plan)},
-    ])
-    session["messages"] = session["messages"][-12:]
-    session["previous_plan"] = plan
-    session["updated_at"] = time.monotonic()
-    return web.json_response({
-        "session_id": session_id,
-        "plan_id": plan_id,
-        "plan": plan,
-        "template_revision": revision,
-        "expires_in_seconds": _PLAN_TTL,
-        "message": "Review the proposed plan; execution requires explicit confirmation.",
-    })
+        # Other sessions can finish while the provider call is suspended.
+        if len(_pending) >= _MAX_PLANS:
+            if supplied is None:
+                _sessions.pop(session_id, None)
+            raise web.HTTPTooManyRequests(text="Too many unconfirmed plans")
+        plan_id = str(uuid.uuid4())
+        _pending[plan_id] = {
+            "expires_at": time.monotonic() + _PLAN_TTL,
+            "plan": plan,
+            "revision": revision,
+            "session_id": session_id,
+        }
+        session["messages"].extend([
+            {"role": "user", "content": message},
+            {"role": "assistant", "content": _plan_summary(plan)},
+        ])
+        session["messages"] = session["messages"][-12:]
+        session["previous_plan"] = plan
+        session["updated_at"] = time.monotonic()
+        return web.json_response({
+            "session_id": session_id,
+            "plan_id": plan_id,
+            "plan": plan,
+            "template_revision": revision,
+            "expires_in_seconds": _PLAN_TTL,
+            "message": "Review the proposed plan; execution requires explicit confirmation.",
+        })
 
 
 def _plan_summary(plan):
     return json.dumps(plan, ensure_ascii=False, separators=(",", ":"))
+
+
+@_routes.post("/comfy-automation/v1/plans/{plan_id}/revise")
+async def automation_revise(request):
+    """Edit approved scalar inputs without giving the client graph authority."""
+    _authenticate(request)
+    data = await _read_json(request)
+    if set(data) - {"parameters", "count"} or not data:
+        raise web.HTTPBadRequest(text="Only parameters and count may be revised")
+    if "parameters" in data and not isinstance(data["parameters"], dict):
+        raise web.HTTPBadRequest(text="Parameters must be an object")
+    if "count" in data and (type(data["count"]) is not int or not 1 <= data["count"] <= 8):
+        raise web.HTTPBadRequest(text="Count must be an integer between 1 and 8")
+
+    async with _confirm_lock:
+        _cleanup()
+        old_id = request.match_info["plan_id"]
+        proposed = _pending.get(old_id)
+        if proposed is None:
+            raise web.HTTPConflict(text="Plan has expired, been confirmed or already revised")
+        current = proposed["plan"]
+        try:
+            if _registry.revision(current["workflow_id"]) != proposed["revision"]:
+                return web.json_response({"error": "Template has changed; create a new plan"}, status=409)
+            edited = {
+                "workflow_id": current["workflow_id"],
+                "parameters": data.get("parameters", current["parameters"]),
+                "count": data.get("count", current["count"]),
+            }
+            edited = _registry.validate_plan(edited)
+            checkpoint = edited["parameters"].get("checkpoint")
+            if checkpoint is not None and checkpoint not in folder_paths.get_filename_list("checkpoints"):
+                raise PlanError("Selected checkpoint is not installed")
+        except PlanError as error:
+            return _error(error)
+        session = _sessions.get(proposed["session_id"])
+        if session and session["previous_plan"] != current:
+            return web.json_response({"error": "This plan is no longer the latest in the chat"}, status=409)
+
+        new_id = str(uuid.uuid4())
+        _pending[new_id] = {
+            "expires_at": time.monotonic() + _PLAN_TTL,
+            "plan": edited,
+            "revision": proposed["revision"],
+            "session_id": proposed["session_id"],
+        }
+        del _pending[old_id]
+        if session is not None:
+            session["previous_plan"] = edited
+            for record in reversed(session["messages"]):
+                if record["role"] == "assistant":
+                    record["content"] = _plan_summary(edited)
+                    break
+            session["updated_at"] = time.monotonic()
+        return web.json_response({
+            "session_id": proposed["session_id"],
+            "plan_id": new_id,
+            "plan": edited,
+            "template_revision": proposed["revision"],
+            "expires_in_seconds": _PLAN_TTL,
+        })
 
 
 def _refuse_partner_api_nodes(graph):
@@ -264,15 +356,28 @@ async def automation_run(request):
         prepared = []
         for graph in graphs:
             prompt_id = str(uuid.uuid4())
-            server.node_replace_manager.apply_replacements(graph)
-            _refuse_partner_api_nodes(graph)
-            valid = await execution.validate_prompt(prompt_id, graph, None)
+            try:
+                server.node_replace_manager.apply_replacements(graph)
+                _refuse_partner_api_nodes(graph)
+                valid = await execution.validate_prompt(prompt_id, graph, None)
+            except web.HTTPException:
+                raise
+            except Exception:
+                _logger.exception("ComfyUI graph validation failed prompt_id=%s", prompt_id)
+                return web.json_response({"error": "ComfyUI could not validate the graph; retry the plan"}, status=503)
             if not valid[0]:
                 return web.json_response({
                     "error": "ComfyUI rejected the workflow",
                     "details": valid[1], "node_errors": valid[3],
                 }, status=400)
             prepared.append((prompt_id, graph, valid[2]))
+
+        # Native ComfyUI clients can enqueue jobs while validation yields to
+        # the event loop. Recheck before submitting; this is an admission
+        # guard, not a global hard limit on external /prompt requests.
+        running, queued = server.prompt_queue.get_current_queue_volatile()
+        if len(running) + len(queued) + len(prepared) > _MAX_QUEUE:
+            raise web.HTTPTooManyRequests(text="ComfyUI queue capacity changed during validation")
 
         # Detect edits to a trusted template while validation was suspended.
         try:

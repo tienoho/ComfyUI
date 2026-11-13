@@ -514,3 +514,208 @@ def test_llm_multiturn_planning_and_output_contract(monkeypatch):
             await upstream.close()
 
     asyncio.run(scenario())
+
+
+
+def test_revise_plan_is_safe_and_invalidates_old_id(monkeypatch):
+    monkeypatch.setenv("COMFY_AUTOMATION_TOKEN", TOKEN)
+    monkeypatch.delenv("COMFY_AUTOMATION_LLM_MODEL", raising=False)
+    extension, server, _ = load_extension()
+
+    async def scenario():
+        app = web.Application()
+        app.add_routes(server.routes)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        headers = {"Authorization": "Bearer " + TOKEN}
+        base = "/comfy-automation/v1"
+        try:
+            initial = await client.post(base + "/chat", headers=headers,
+                                        json={"message": "Biển Hạ Long"})
+            data = await initial.json()
+            before = data["plan_id"]
+            changes = {
+                "parameters": {
+                    "prompt": "Bình minh trên vịnh",
+                    "checkpoint": "installed.safetensors",
+                    "width": 1024,
+                    "height": 512,
+                },
+                "count": 2,
+            }
+            updated = await client.post(
+                base + "/plans/" + before + "/revise", headers=headers, json=changes)
+            assert updated.status == 200
+            revised = await updated.json()
+            assert revised["plan_id"] != before
+            assert revised["plan"]["count"] == 2
+            assert revised["template_revision"] == data["template_revision"]
+            assert extension._sessions[data["session_id"]]["previous_plan"] == revised["plan"]
+
+            old = await client.post(base + "/runs", headers=headers, json={"plan_id": before})
+            assert old.status == 400
+            run = await client.post(base + "/runs", headers=headers,
+                                    json={"plan_id": revised["plan_id"]})
+            assert run.status == 201
+            assert len(server.prompt_queue.items) == 2
+            assert all(job[2]["4"]["inputs"]["ckpt_name"] == "installed.safetensors"
+                       for job in server.prompt_queue.items)
+            assert all(job[2]["6"]["inputs"]["text"] == "Bình minh trên vịnh"
+                       for job in server.prompt_queue.items)
+
+            rejected = await client.post(base + "/plans/" + revised["plan_id"] + "/revise",
+                                         headers=headers, json={"parameters": {"shell": "cat /etc/passwd"}})
+            assert rejected.status == 409  # already-confirmed plans cannot be edited
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_multiple_models_require_user_choice_and_reject_unknown_models(monkeypatch):
+    monkeypatch.setenv("COMFY_AUTOMATION_TOKEN", TOKEN)
+    monkeypatch.delenv("COMFY_AUTOMATION_LLM_MODEL", raising=False)
+    extension, server, folders = load_extension()
+    folders.get_filename_list = lambda name: ["a.safetensors", "b.safetensors"]
+
+    async def scenario():
+        app = web.Application()
+        app.add_routes(server.routes)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        headers = {"Authorization": "Bearer " + TOKEN}
+        base = "/comfy-automation/v1"
+        try:
+            discovered = await client.get(base + "/workflows", headers=headers)
+            assert (await discovered.json())["checkpoints"] == ["a.safetensors", "b.safetensors"]
+            initial = await client.post(base + "/chat", headers=headers, json={"message": "A bridge"})
+            initial_id = (await initial.json())["plan_id"]
+            no_selection = await client.post(base + "/runs", headers=headers,
+                                             json={"plan_id": initial_id})
+            assert no_selection.status == 400
+            assert "checkpoint" in (await no_selection.json())["error"].lower()
+            assert not server.prompt_queue.items
+
+            invalid = await client.post(base + "/chat", headers=headers, json={
+                "message": "A bridge", "checkpoint": "missing.safetensors",
+            })
+            assert invalid.status == 400
+
+            chosen = await client.post(base + "/chat", headers=headers, json={
+                "message": "A bridge", "checkpoint": "b.safetensors",
+            })
+            data = await chosen.json()
+            assert data["plan"]["parameters"]["checkpoint"] == "b.safetensors"
+            run = await client.post(base + "/runs", headers=headers,
+                                    json={"plan_id": data["plan_id"]})
+            assert run.status == 201
+            assert server.prompt_queue.items[-1][2]["4"]["inputs"]["ckpt_name"] == "b.safetensors"
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_chat_in_one_session_preserves_context(monkeypatch):
+    monkeypatch.setenv("COMFY_AUTOMATION_TOKEN", TOKEN)
+    monkeypatch.delenv("COMFY_AUTOMATION_LLM_MODEL", raising=False)
+    extension, server, _ = load_extension()
+    observed = []
+
+    async def slow_plan(registry, message, preferred_id=None, *, history, previous_plan):
+        observed.append((message, len(history), previous_plan))
+        await asyncio.sleep(0.02)
+        return {"workflow_id": "text-to-image", "parameters": {"prompt": message}, "count": 1}
+
+    extension.create_plan = slow_plan
+
+    async def scenario():
+        app = web.Application()
+        app.add_routes(server.routes)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        headers = {"Authorization": "Bearer " + TOKEN}
+        base = "/comfy-automation/v1/chat"
+        try:
+            first = await client.post(base, headers=headers, json={"message": "First"})
+            session_id = (await first.json())["session_id"]
+            results = await asyncio.gather(
+                client.post(base, headers=headers,
+                            json={"session_id": session_id, "message": "Second"}),
+                client.post(base, headers=headers,
+                            json={"session_id": session_id, "message": "Third"}),
+            )
+            assert all(response.status == 200 for response in results)
+            assert [entry[1] for entry in observed] == [0, 2, 4]
+            history = extension._sessions[session_id]["messages"]
+            assert len(history) == 6
+            assert {row["content"] for row in history if row["role"] == "user"} == {
+                "First", "Second", "Third",
+            }
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_native_queue_race_is_rechecked_before_dispatch(monkeypatch):
+    monkeypatch.setenv("COMFY_AUTOMATION_TOKEN", TOKEN)
+    monkeypatch.delenv("COMFY_AUTOMATION_LLM_MODEL", raising=False)
+    extension, server, _ = load_extension()
+
+    async def inject_native_jobs(prompt_id, graph, targets):
+        await asyncio.sleep(0)
+        server.prompt_queue.items = [
+            (0, "native-" + str(i), {}, {}, [], {}) for i in range(extension._MAX_QUEUE)
+        ]
+        return True, None, ["9"], {}
+
+    extension.execution.validate_prompt = inject_native_jobs
+
+    async def scenario():
+        app = web.Application()
+        app.add_routes(server.routes)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        headers = {"Authorization": "Bearer " + TOKEN}
+        base = "/comfy-automation/v1"
+        try:
+            plan = await client.post(base + "/chat", headers=headers,
+                                     json={"message": "A boat"})
+            plan_id = (await plan.json())["plan_id"]
+            rejected = await client.post(base + "/runs", headers=headers,
+                                         json={"plan_id": plan_id})
+            assert rejected.status == 429
+            assert len(server.prompt_queue.items) == extension._MAX_QUEUE
+            assert all(str(job[1]).startswith("native-") for job in server.prompt_queue.items)
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_partial_llm_configuration_is_an_error_not_silent_fallback(monkeypatch):
+    monkeypatch.setenv("COMFY_AUTOMATION_TOKEN", TOKEN)
+    monkeypatch.setenv("COMFY_AUTOMATION_LLM_MODEL", "missing-url-model")
+    monkeypatch.delenv("COMFY_AUTOMATION_LLM_URL", raising=False)
+    extension, server, _ = load_extension()
+
+    async def scenario():
+        app = web.Application()
+        app.add_routes(server.routes)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        headers = {"Authorization": "Bearer " + TOKEN}
+        base = "/comfy-automation/v1"
+        try:
+            discovery = await client.get(base + "/workflows", headers=headers)
+            assert (await discovery.json())["llm_configuration_error"] is True
+            bad = await client.post(base + "/chat", headers=headers,
+                                    json={"message": "A harbor"})
+            assert bad.status == 400
+            assert "COMFY_AUTOMATION_LLM_URL" in (await bad.json())["error"]
+            assert not extension._sessions
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
