@@ -115,7 +115,7 @@ def start(server, scheme: str, address: str, port: int) -> None:
     # (claiming its data dir) while the flag reports failed, so bail out too.
     if _host is None or _failure is not None:
         return
-    global _stopping, _start_requested
+    global _stopping, _start_requested, _failure
     with _event_lock:
         if _stopping or _start_requested:
             return
