@@ -3,6 +3,8 @@ name: Native Comfy Agent host probe
 on:
   pull_request:
     paths:
+      - 'app/agent_host.py'
+      - 'tests-unit/app_test/agent_host_test.py'
       - 'script_examples/check_native_agent.py'
       - 'tests-unit/native_agent_panel_check_test.py'
       - 'NATIVE_AGENT_PANEL.md'
@@ -11,6 +13,8 @@ on:
     branches:
       - feat/chat-agent-workflow-automation
     paths:
+      - 'app/agent_host.py'
+      - 'tests-unit/app_test/agent_host_test.py'
       - 'script_examples/check_native_agent.py'
       - 'tests-unit/native_agent_panel_check_test.py'
       - 'NATIVE_AGENT_PANEL.md'
@@ -33,4 +37,32 @@ jobs:
       - name: Compile native probe
         run: python -m py_compile script_examples/check_native_agent.py
       - name: Verify official feature and route contract
-        run: python -m pytest -q tests-unit/native_agent_panel_check_test.py
+        run: python -m pytest -q tests-unit/native_agent_panel_check_test.py tests-unit/app_test/agent_host_test.py
+
+  official-wheel-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install published Comfy Agent release candidate
+        run: python -m pip install --pre "comfy-agent==0.1.0rc8"
+      - name: Check native v1 entry point and lifecycle contract
+        run: |
+          python - <<'PY'
+          import importlib.metadata
+          from app import agent_host
+
+          eps = {ep.name: ep for ep in importlib.metadata.entry_points(
+              group=agent_host.ENTRY_POINT_GROUP)}
+          assert agent_host.PROTOCOL in eps, f"Missing v1 host: {sorted(eps)}"
+          host = eps[agent_host.PROTOCOL].load()()
+          assert all(callable(getattr(host, method, None)) for method in (
+              "register", "start", "stop", "status"))
+          state = host.status()
+          assert isinstance(state, dict) and state.get("state") in (
+              "starting", "ready", "failed")
+          print("Comfy Agent wheel: v1 host contract OK")
+          PY
