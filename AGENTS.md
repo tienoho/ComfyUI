@@ -27,6 +27,35 @@
   layers, vague names, boilerplate comments, defensive branches without a real
   failure mode, broad rewrites, or code that ignores the local style.
 
+## Official Agent Panel Integration
+
+- Reuse the first-party Comfy Agent Panel, not a custom floating chat, duplicate
+  conversation service, second planner, separate workflow queue or local agent
+  runtime. The backend integration owner is `app/agent_host.py`.
+- Keep the `comfyui.agent` v1 host contract minimal: `register`, `start`,
+  `status` and `stop`. `/api/agent`, events, sessions and authentication
+  belong to the installed official agent package.
+- The official frontend package owns Agent Panel UI, consent, canvas CRDT and
+  workflow-tab state. Do not inject custom scripts into a packaged frontend
+  or depend on private Agent websocket messages as a tool extension API.
+- Make lifecycle changes idempotent and thread-safe; test shutdown races,
+  feature-flag consistency, native API routes and reconnect behavior.
+- Keep in-panel tool extensions out of scope until the vendor publishes a
+  stable, documented registration contract. Use approved native ComfyUI
+  capabilities and `comfy-mcp` only for separate external-agent workflows.
+- For Agent observability, prefer the vendor's documented `agent_message_done`
+  token/charge contract and first-party credits UI. An absent charge means
+  *unknown*, not zero; vendor model charge is not automatically the invoice.
+  Never estimate actual cost from token counts alone.
+- Show LLM model IDs only with an authoritative, validated model receipt;
+  a model mentioned in prompt text, deployment documentation or a ComfyUI
+  image checkpoint is not proof of the Agent model used.
+- The offline `script_examples/agent_usage_report.py` is diagnostics for
+  authorized event exports, not a live traffic collector or a parallel UI.
+  Do not capture private Agent WebSocket frames or account tokens by default.
+- Require real signed-in browser and GPU UAT before describing an agent change
+  as production-ready. CPU smoke tests verify boot and integration only.
+
 ## Architecture Boundaries
 
 - Keep `comfy/` limited to model implementations and their supporting inference

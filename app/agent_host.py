@@ -21,6 +21,7 @@ from __future__ import annotations
 import importlib.metadata
 import logging
 import os
+import threading
 
 import folder_paths
 from comfy_api import feature_flags
@@ -34,6 +35,10 @@ _host = None
 _failure = None
 # feature_flag() can be read on every connection; log a raising status() once.
 _status_logged = False
+# The agent's on_change callback runs on package-managed worker threads.
+_event_lock = threading.Lock()
+_stopping = False
+_start_requested = False
 
 
 def emit_event(event, /, **fields) -> None:
@@ -44,14 +49,24 @@ def load() -> bool:
     """Find and create the agent host. Reports why when it can't; nothing about
     the installed package can stop ComfyUI from starting."""
     global _host, _failure
+    if _host is not None or _failure is not None:
+        return _failure is None
     try:
-        entry_points = {ep.name: ep for ep in importlib.metadata.entry_points(group=ENTRY_POINT_GROUP)}
+        points = list(importlib.metadata.entry_points(group=ENTRY_POINT_GROUP))
+        matches = [ep for ep in points if ep.name == PROTOCOL]
+        if len(matches) > 1:
+            logging.error("Multiple comfy-agent v1 hosts installed; remove conflicting packages.")
+            _failure = {"state": "failed", "reason": "ambiguous_host"}
+            emit_event("agent_error", reason="ambiguous_host")
+            _publish_flag()
+            return False
+        entry_points = {ep.name: ep for ep in points}
         if PROTOCOL not in entry_points:
             # Some comfy-agent is installed (other protocols present) -> "update";
             # nothing there -> "install". The file names the package without a
             # version, so only `-U` moves an old or placeholder install.
             req = os.path.join(os.path.dirname(os.path.abspath(folder_paths.__file__)), "agent_requirements.txt")
-            install = f'pip install -U -r "{req}"'
+            install = f'python -m pip install --pre -U -r "{req}"'
             if entry_points:
                 logging.warning(f"The installed comfy-agent offers agent protocols {sorted(entry_points)}; this ComfyUI needs {PROTOCOL}. Update it with `{install}` to use the agent.")
                 _failure = {"state": "failed", "reason": "outdated"}
@@ -97,29 +112,50 @@ def register(app) -> None:
 
 def start(server, scheme: str, address: str, port: int) -> None:
     """Start the loaded host once the server is listening. Main thread only."""
+    global _stopping, _start_requested, _failure
     # register() may have failed after load(): _host stays set but _failure is
     # now recorded. Starting then would spawn an agent with no routes mounted
     # (claiming its data dir) while the flag reports failed, so bail out too.
     if _host is None or _failure is not None:
         return
+    with _event_lock:
+        if _stopping or _start_requested:
+            return
+        _start_requested = True
     host = "127.0.0.1" if address in ("", "0.0.0.0") else "::1" if address == "::" else address
     comfy_url = f"{scheme}://[{host}]:{port}" if ":" in host else f"{scheme}://{host}:{port}"
 
     last_sent = None
 
     def on_change():
-        # Called from the host's threads; last_sent is unsynchronized, so a race
-        # costs at most one duplicate message. The host also reports changes the
-        # published flag doesn't carry (e.g. its restart count), so only send
-        # when the flag itself moves.
+        # The wheel may call from multiple threads. Serialize flag reads and
+        # websocket notifications so an older state cannot overtake a newer one.
         nonlocal last_sent
-        flag = _publish_flag()
-        if flag != last_sent:
+        with _event_lock:
+            if _stopping:
+                return
+            flag = _publish_flag()
+            if flag == last_sent:
+                return
+            if server.loop is not None and server.loop.is_closed():
+                return
+            try:
+                server.send_sync("agent_status", flag)
+            except RuntimeError:
+                # ComfyUI may close its loop between our guard and send_sync.
+                logging.debug("Agent status event dropped during ComfyUI shutdown.")
+                return
             last_sent = flag
-            server.send_sync("agent_status", flag)
+            if isinstance(flag, dict):
+                emit_event("agent_state_changed", state=flag.get("state"), reason=flag.get("reason"))
 
     def run():
         global _failure
+        # An executor can schedule this callback after ComfyUI has already
+        # entered shutdown; do not launch the child in that case.
+        with _event_lock:
+            if _stopping:
+                return
         try:
             _host.start(comfy_url=comfy_url, comfy_path=os.path.dirname(os.path.abspath(folder_paths.__file__)), logger=logging.getLogger(), on_change=on_change)
         except (Exception, SystemExit):
@@ -130,12 +166,21 @@ def start(server, scheme: str, address: str, port: int) -> None:
 
     # start() spawns and waits on the agent child, so keep it off the event loop.
     if server.loop is not None:
-        server.loop.run_in_executor(None, run)
+        try:
+            server.loop.run_in_executor(None, run)
+        except RuntimeError:
+            logging.exception("Could not schedule the local agent on a closing event loop.")
+            _failure = {"state": "failed", "reason": "spawn_failed"}
+            emit_event("agent_error", reason="spawn_failed")
+            on_change()
     else:
         run()
 
 
 def stop() -> None:
+    global _stopping
+    with _event_lock:
+        _stopping = True
     if _host is not None:
         try:
             _host.stop()
@@ -162,9 +207,14 @@ def feature_flag():
         return _failure
     try:
         status = _host.status()
+        if not isinstance(status, dict) or status.get("state") not in ("starting", "ready", "failed"):
+            raise ValueError("Invalid comfy-agent host status")
+        reason = status.get("reason")
+        if reason is not None and not isinstance(reason, str):
+            raise ValueError("Invalid comfy-agent host status reason")
         flag = {"state": status["state"]}
-        if status.get("reason"):
-            flag["reason"] = status["reason"]
+        if reason:
+            flag["reason"] = reason
         return flag
     except SystemExit:  # a wheel that exits is broken, not briefly unhealthy, so disable it
         logging.exception("The local agent's status could not be read; it is disabled.")

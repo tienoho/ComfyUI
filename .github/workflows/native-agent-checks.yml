@@ -1,0 +1,141 @@
+name: Native Comfy Agent host probe
+
+on:
+  pull_request:
+    paths:
+      - 'app/agent_host.py'
+      - 'tests-unit/app_test/agent_host_test.py'
+      - 'script_examples/check_native_agent.py'
+      - 'script_examples/agent_usage_report.py'
+      - 'tests-unit/agent_usage_report_test.py'
+      - 'tests-unit/native_agent_panel_check_test.py'
+      - 'NATIVE_AGENT_PANEL.md'
+      - '.github/workflows/native-agent-checks.yml'
+  push:
+    branches:
+      - feat/chat-agent-workflow-automation
+    paths:
+      - 'app/agent_host.py'
+      - 'tests-unit/app_test/agent_host_test.py'
+      - 'script_examples/check_native_agent.py'
+      - 'script_examples/agent_usage_report.py'
+      - 'tests-unit/agent_usage_report_test.py'
+      - 'tests-unit/native_agent_panel_check_test.py'
+      - 'NATIVE_AGENT_PANEL.md'
+      - '.github/workflows/native-agent-checks.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  native-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pytest
+        run: python -m pip install pytest
+      - name: Compile native integration and tests
+        run: |
+          python -m py_compile app/agent_host.py script_examples/check_native_agent.py script_examples/agent_usage_report.py
+          python -m py_compile tests-unit/app_test/agent_host_test.py tests-unit/native_agent_panel_check_test.py tests-unit/agent_usage_report_test.py
+      - name: Verify official feature and route contract
+        run: python -m pytest -q tests-unit/native_agent_panel_check_test.py tests-unit/app_test/agent_host_test.py tests-unit/agent_usage_report_test.py
+
+  official-wheel-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install published Comfy Agent release candidate
+        run: python -m pip install --pre "comfy-agent==0.1.0rc8"
+      - name: Verify published wheel dependencies
+        run: python -m pip check
+      - name: Check native v1 entry point and lifecycle contract
+        run: |
+          python - <<'PY'
+          import importlib.metadata
+          from app import agent_host
+
+          eps = {ep.name: ep for ep in importlib.metadata.entry_points(
+              group=agent_host.ENTRY_POINT_GROUP)}
+          assert agent_host.PROTOCOL in eps, f"Missing v1 host: {sorted(eps)}"
+          host = eps[agent_host.PROTOCOL].load()()
+          assert all(callable(getattr(host, method, None)) for method in (
+              "register", "start", "stop", "status"))
+          state = host.status()
+          assert isinstance(state, dict) and state.get("state") in (
+              "starting", "ready", "failed")
+          print("Comfy Agent wheel: v1 host contract OK")
+          PY
+
+
+  real-fork-agent-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install ComfyUI CPU runtime and matching official Agent wheel
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements.txt
+          python -m pip install --pre "comfy-agent[go-nonfree]==0.1.0rc8"
+          python -m pip check
+      - name: Start real fork with --enable-agent and probe same-origin host
+        run: |
+          set -eu
+          python main.py --cpu --enable-agent --disable-auto-launch --disable-all-custom-nodes > /tmp/comfy-native-agent-smoke.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          if ! python script_examples/check_native_agent.py --wait-seconds 120; then
+            tail -n 160 /tmp/comfy-native-agent-smoke.log
+            exit 1
+          fi
+          python - <<'PY'
+          import json
+          import urllib.request
+
+          base = "http://127.0.0.1:8188"
+          with urllib.request.urlopen(base + "/extensions", timeout=5) as response:
+              extensions = json.load(response)
+          assert not any("comfyui_agent_automation" in name for name in extensions), (
+              "Redundant Chat Automation extension must not be installed")
+          with urllib.request.urlopen(base + "/", timeout=5) as response:
+              assert response.status == 200 and "text/html" in response.headers["Content-Type"]
+          print("Single official ComfyUI frontend, no duplicate Automation extension: PASS")
+          PY
+          python - <<'PY'
+          import asyncio
+          import aiohttp
+
+          async def check_native_handshake():
+              async with aiohttp.ClientSession() as session:
+                  for _ in range(2):  # Fresh websocket and reconnect.
+                      async with session.ws_connect(
+                          "http://127.0.0.1:8188/ws", timeout=10,
+                      ) as ws:
+                          first = await ws.receive_json(timeout=10)
+                          assert first["type"] == "status"
+                          await ws.send_json({"type": "feature_flags", "data": {}})
+                          for _ in range(10):
+                              response = await ws.receive_json(timeout=10)
+                              if response["type"] == "feature_flags":
+                                  break
+                          else:
+                              raise AssertionError("Native feature negotiation did not respond")
+                          assert response["data"]["agent"]["state"] == "ready"
+              print("Official Agent ready state survives native websocket reconnect: PASS")
+
+          asyncio.run(check_native_handshake())
+          PY
+          echo "Native official Agent entry point, process and ComfyUI /api/agent route: PASS"
