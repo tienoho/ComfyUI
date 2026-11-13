@@ -110,12 +110,12 @@ def register(app) -> None:
 
 def start(server, scheme: str, address: str, port: int) -> None:
     """Start the loaded host once the server is listening. Main thread only."""
+    global _stopping, _start_requested, _failure
     # register() may have failed after load(): _host stays set but _failure is
     # now recorded. Starting then would spawn an agent with no routes mounted
     # (claiming its data dir) while the flag reports failed, so bail out too.
     if _host is None or _failure is not None:
         return
-    global _stopping, _start_requested, _failure
     with _event_lock:
         if _stopping or _start_requested:
             return
