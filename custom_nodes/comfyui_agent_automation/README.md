@@ -94,11 +94,11 @@ token is not configured, requests fail closed with HTTP 503.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| GET | /tcg-automation/v1/workflows | Approved workflow list |
-| POST | /tcg-automation/v1/chat | Plan from message, optional workflow_id |
-| POST | /tcg-automation/v1/runs | Confirm and queue a previously returned plan_id |
-| GET | /tcg-automation/v1/runs/{run_id} | Per-job state and output metadata |
-| POST | /tcg-automation/v1/runs/{run_id}/cancel | Cancel only this run |
+| GET | /comfy-automation/v1/workflows | Approved workflow list |
+| POST | /comfy-automation/v1/chat | Plan from message, optional workflow_id |
+| POST | /comfy-automation/v1/runs | Confirm and queue a previously returned plan_id |
+| GET | /comfy-automation/v1/runs/{run_id} | Per-job state and output metadata |
+| POST | /comfy-automation/v1/runs/{run_id}/cancel | Cancel only this run |
 
 Plans expire after 15 minutes and may be confirmed once. Chat requests cannot
 supply a raw graph or URL. Up to 8 prompt graphs are validated before any are

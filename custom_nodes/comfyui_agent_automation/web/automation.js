@@ -76,7 +76,7 @@ app.registerExtension({
     const api = async (path, method = "GET", data = undefined) => {
       const headers = { Authorization: "Bearer " + token.value };
       if (data !== undefined) headers["Content-Type"] = "application/json";
-      const res = await fetch("/tcg-automation/v1" + path, {
+      const res = await fetch("/comfy-automation/v1" + path, {
         method, headers, credentials: "same-origin",
         ...(data === undefined ? {} : { body: JSON.stringify(data) }),
       });

@@ -68,7 +68,7 @@ def _error(error: PlanError):
     return web.json_response({"error": str(error)}, status=400)
 
 
-@_routes.get("/tcg-automation/v1/workflows")
+@_routes.get("/comfy-automation/v1/workflows")
 async def automation_workflows(request):
     _authenticate(request)
     return web.json_response({"workflows": _registry.list(),
@@ -76,7 +76,7 @@ async def automation_workflows(request):
                                                      os.getenv("COMFY_AUTOMATION_LLM_URL"))})
 
 
-@_routes.post("/tcg-automation/v1/chat")
+@_routes.post("/comfy-automation/v1/chat")
 async def automation_chat(request):
     _authenticate(request)
     data = await _read_json(request)
@@ -93,7 +93,7 @@ async def automation_chat(request):
                               "message": "Review the plan and confirm to queue execution."})
 
 
-@_routes.post("/tcg-automation/v1/runs")
+@_routes.post("/comfy-automation/v1/runs")
 async def automation_run(request):
     _authenticate(request)
     data = await _read_json(request)
@@ -173,7 +173,7 @@ def _run_status(run):
     return jobs
 
 
-@_routes.get("/tcg-automation/v1/runs/{run_id}")
+@_routes.get("/comfy-automation/v1/runs/{run_id}")
 async def automation_run_status(request):
     _authenticate(request)
     _cleanup()
@@ -182,7 +182,7 @@ async def automation_run_status(request):
                               "workflow_id": run["workflow_id"], "jobs": _run_status(run)})
 
 
-@_routes.post("/tcg-automation/v1/runs/{run_id}/cancel")
+@_routes.post("/comfy-automation/v1/runs/{run_id}/cancel")
 async def automation_cancel(request):
     _authenticate(request)
     run = _lookup_run(request.match_info["run_id"])
