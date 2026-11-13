@@ -83,3 +83,67 @@ def test_false_ready_from_static_fallback_is_rejected(identity_body):
 
     with pytest.raises(probe.ProbeError, match="identity endpoint"):
         probe.probe_once("http://127.0.0.1:8188", get_status=respond)
+
+
+
+def test_authenticated_probe_rejects_unauthenticated_identity():
+    with pytest.raises(probe.ProbeError, match="did not authenticate"):
+        probe.probe_once("http://127.0.0.1:8188", get_status=fake(
+            feature={"agent": {"state": "ready"}}, identity=401),
+            require_authenticated=True)
+    result = probe.probe_once("http://127.0.0.1:8188", get_status=fake(
+        feature={"agent": {"state": "ready"}}, identity=200),
+        require_authenticated=True)
+    assert result["identity_authenticated"] is True
+
+
+def test_authenticated_probe_requires_environment_token(monkeypatch, capsys):
+    monkeypatch.delenv("COMFY_AGENT_PROBE_TOKEN", raising=False)
+    assert probe.main(["--require-authenticated"], get_status=fake()) == 2
+    assert "COMFY_AGENT_PROBE_TOKEN" in capsys.readouterr().err
+
+
+def test_authenticated_remote_probe_requires_explicit_https(monkeypatch, capsys):
+    monkeypatch.setenv("COMFY_AGENT_PROBE_TOKEN", "not-a-real-token")
+    assert probe.main([
+        "--url", "https://external.example", "--require-authenticated",
+    ], get_status=fake()) == 2
+    assert "--allow-remote" in capsys.readouterr().err
+    assert probe.main([
+        "--url", "http://external.example", "--require-authenticated",
+        "--allow-remote",
+    ], get_status=fake()) == 2
+    assert "HTTPS" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("header_name, expected", [
+    ("Authorization", "Bearer fake-test-token"),
+    ("X-API-KEY", "fake-test-token"),
+])
+def test_auth_header_is_not_printed_and_is_derived_from_environment(
+        monkeypatch, capsys, header_name, expected):
+    class Response:
+        status = 200
+        def __enter__(self):
+            return self
+        def __exit__(self, *_args):
+            return None
+        def read(self, _max_size):
+            return b'{"agent":{"state":"ready"}}'
+
+    seen_headers = []
+
+    class Opener:
+        def open(self, request, timeout):
+            seen_headers.append(request.headers)
+            return Response()
+
+    monkeypatch.setattr(probe, "_OPENER", Opener())
+    status, body = probe._get_status(
+        "https://local.example", "/features", credential="fake-test-token",
+        credential_header=header_name)
+    assert status == 200 and body
+    assert seen_headers[0][header_name.capitalize()] == expected if header_name == "Authorization" else (
+        seen_headers[0]["X-api-key"] == expected
+    )
+    assert "fake-test-token" not in capsys.readouterr().out
