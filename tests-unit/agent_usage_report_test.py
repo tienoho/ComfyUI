@@ -65,6 +65,8 @@ def test_model_receipt_requires_provenance_and_contract():
     result = report.summarize_lines(jsonl(event(model_receipt=receipt)))
     assert result["model_attribution"]["receipt_backed_turns"] == 1
     assert result["by_model"]["claude-opus-5"]["turns"] == 1
+    assert result["model_attribution"]["selection_sources"]["request"] == 1
+    assert result["model_attribution"]["selection_sources"]["deployment_default"] == 0
     with pytest.raises(report.UsageReportError, match="Invalid v1 model receipt"):
         report.summarize_lines(jsonl(event(
             model_receipt={**receipt, "model_id": "not a valid model id"})))
