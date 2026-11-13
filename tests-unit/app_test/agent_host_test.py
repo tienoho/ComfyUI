@@ -476,3 +476,19 @@ def test_executor_rejection_fails_host_gracefully(monkeypatch):
     assert agent_host._host.started is None
     assert agent_host.feature_flag() == {"state": "failed", "reason": "spawn_failed"}
     assert sent == [("agent_status", {"state": "failed", "reason": "spawn_failed"})]
+
+
+
+def test_repeated_load_reuses_existing_host_instead_of_constructing_new_one(monkeypatch):
+    constructions = []
+
+    def factory():
+        host = FakeHost()
+        constructions.append(host)
+        return host
+
+    _entry_points(monkeypatch, {"v1": factory})
+    assert agent_host.load() is True
+    assert agent_host.load() is True
+    assert len(constructions) == 1
+    assert agent_host._host is constructions[0]
