@@ -110,4 +110,24 @@ jobs:
               assert response.status == 200 and "text/html" in response.headers["Content-Type"]
           print("Single official ComfyUI frontend, no duplicate Automation extension: PASS")
           PY
+          python - <<'PY'
+          import asyncio
+          import aiohttp
+
+          async def check_native_handshake():
+              async with aiohttp.ClientSession() as session:
+                  for _ in range(2):  # Fresh websocket and reconnect.
+                      async with session.ws_connect(
+                          "http://127.0.0.1:8188/ws", timeout=10,
+                      ) as ws:
+                          first = await ws.receive_json(timeout=10)
+                          assert first["type"] == "status"
+                          await ws.send_json({"type": "feature_flags", "data": {}})
+                          response = await ws.receive_json(timeout=10)
+                          assert response["type"] == "feature_flags"
+                          assert response["data"]["agent"]["state"] == "ready"
+              print("Official Agent ready state survives native websocket reconnect: PASS")
+
+          asyncio.run(check_native_handshake())
+          PY
           echo "Native official Agent entry point, process and ComfyUI /api/agent route: PASS"
