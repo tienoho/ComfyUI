@@ -136,6 +136,11 @@ def start(server, scheme: str, address: str, port: int) -> None:
 
     def run():
         global _failure
+        # An executor can schedule this callback after ComfyUI has already
+        # entered shutdown; do not launch the child in that case.
+        with _event_lock:
+            if _stopping:
+                return
         try:
             _host.start(comfy_url=comfy_url, comfy_path=os.path.dirname(os.path.abspath(folder_paths.__file__)), logger=logging.getLogger(), on_change=on_change)
         except (Exception, SystemExit):
