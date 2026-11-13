@@ -136,10 +136,10 @@ def test_invalid_multiple_of_and_choice_types_rejected(registry):
     with pytest.raises(engine.PlanError, match="multiple_of"):
         registry.validate_plan({"workflow_id": "image", "parameters": {"seed": 2}})
     manifest["inputs"]["seed"]["multiple_of"] = 2
-    manifest["inputs"]["seed"]["choices"] = [True, 2]
+    manifest["inputs"]["seed"]["choices"] = [True, 4]
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(engine.PlanError, match="allowed choice"):
-        registry.validate_plan({"workflow_id": "image", "parameters": {"seed": 1}})
+        registry.validate_plan({"workflow_id": "image", "parameters": {"seed": 2}})
     assert registry.validate_plan({
-        "workflow_id": "image", "parameters": {"seed": 2},
-    })["parameters"]["seed"] == 2
+        "workflow_id": "image", "parameters": {"seed": 4},
+    })["parameters"]["seed"] == 4
