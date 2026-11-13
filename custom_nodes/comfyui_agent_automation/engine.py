@@ -8,6 +8,7 @@ add nodes, alter connections, install packages, or change filesystem paths.
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import re
@@ -25,6 +26,24 @@ _MAX_BATCH = 8
 class Registry:
     def __init__(self, directory: Path):
         self.directory = Path(directory).resolve()
+
+    def revision(self, workflow_id: str) -> str:
+        """Pin the exact trusted manifest and API graph that were approved."""
+        self._manifest(workflow_id)
+        manifest_path = self.directory / (workflow_id + ".json")
+        graph_path = self.directory / (workflow_id + ".api.json")
+        if graph_path.is_symlink() or not graph_path.is_file():
+            raise PlanError("Workflow API graph is missing or is a symlink")
+        try:
+            if manifest_path.stat().st_size > 65536 or graph_path.stat().st_size > 2097152:
+                raise PlanError("Workflow template exceeds size limits")
+            digest = hashlib.sha256()
+            for path in (manifest_path, graph_path):
+                digest.update(path.read_bytes())
+                digest.update(b"\x00")
+            return digest.hexdigest()
+        except OSError as error:
+            raise PlanError("Cannot read workflow template") from error
 
     def _manifest(self, workflow_id: str) -> dict:
         if not isinstance(workflow_id, str) or not _ID.fullmatch(workflow_id):
@@ -50,6 +69,10 @@ class Registry:
                 raise PlanError("Workflow input must target a node and field")
             if spec.get("type") not in ("string", "integer", "number", "boolean"):
                 raise PlanError("Unsupported editable input type")
+            if "multiple_of" in spec and (type(spec["multiple_of"]) is not int or spec["multiple_of"] <= 0):
+                raise PlanError("Invalid input multiple_of")
+            if "choices" in spec and (not isinstance(spec["choices"], list) or not spec["choices"]):
+                raise PlanError("Invalid input choices")
         return manifest
 
     def list(self) -> list[dict]:
@@ -107,7 +130,7 @@ class Registry:
                     raise PlanError(key + " is above the maximum")
             if "multiple_of" in spec and type(item) is int and item % spec["multiple_of"] != 0:
                 raise PlanError(key + " must be a multiple of " + str(spec["multiple_of"]))
-            if "choices" in spec and item not in spec["choices"]:
+            if "choices" in spec and not any(type(item) is type(choice) and item == choice for choice in spec["choices"]):
                 raise PlanError(key + " is not an allowed choice")
             normalized[key] = item
         return {"workflow_id": workflow_id, "parameters": normalized, "count": count}
@@ -124,8 +147,8 @@ class Registry:
             original = json.loads(graph_path.read_text(encoding="utf-8"))
         except (ValueError, OSError) as error:
             raise PlanError("Cannot read the API workflow") from error
-        if not isinstance(original, dict) or not original:
-            raise PlanError("API workflow must be a node map")
+        if not isinstance(original, dict) or not original or len(original) > 1024:
+            raise PlanError("API workflow must contain 1-1024 nodes")
         for key, spec in manifest["inputs"].items():
             node = original.get(spec["node_id"])
             if not isinstance(node, dict) or not isinstance(node.get("inputs"), dict):

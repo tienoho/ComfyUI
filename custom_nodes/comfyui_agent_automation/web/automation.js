@@ -50,6 +50,11 @@ app.registerExtension({
     workflow.setAttribute("aria-label", "Workflow");
     el("option", { value: "", text: "Tự động chọn workflow" }, workflow);
 
+    const countRow = el("div", { className: "comfy-automation-row" }, controls);
+    el("label", { text: "Số tác vụ (1–8)" }, countRow);
+    const count = el("input", { type: "number", min: "1", max: "8", step: "1", value: "1" }, countRow);
+    count.setAttribute("aria-label", "Batch count");
+
     const messages = el("div", { id: "comfy-automation-messages" }, panel);
     messages.setAttribute("role", "log");
     messages.setAttribute("aria-live", "polite");
@@ -59,7 +64,9 @@ app.registerExtension({
     const refresh = el("button", { text: "Tải workflow" }, row);
     const send = el("button", { text: "Lập kế hoạch" }, row);
     let busy = false;
-    let pollTimer = null;
+    let sessionId = null;
+    let currentConfirm = null;
+    const pollTimers = new Map();
 
     const message = (text, isUser = false) => {
       const bubble = el("div", { className: "comfy-automation-message" + (isUser ? " comfy-automation-user" : "") }, messages);
@@ -83,7 +90,12 @@ app.registerExtension({
       const responseText = await res.text();
       let body;
       try { body = JSON.parse(responseText); } catch { body = { error: responseText }; }
-      if (!res.ok) throw new Error(body.error || "HTTP " + res.status);
+      if (!res.ok) {
+        const error = new Error(body.error || "HTTP " + res.status);
+        error.detail = body;
+        error.status = res.status;
+        throw error;
+      }
       return body;
     };
 
@@ -102,59 +114,117 @@ app.registerExtension({
     }
 
     async function followRun(runId) {
-      if (pollTimer) clearInterval(pollTimer);
-      pollTimer = null;
+      if (pollTimers.has(runId)) return;
       const output = message("Đã xếp hàng. Run ID: " + runId);
-      let stopped = false;
+      const resultLinks = el("div", { className: "comfy-automation-message" }, messages);
+      const rendered = new Set();
+      const cancel = el("button", { text: "Hủy run" }, messages);
+      let failures = 0;
+      let finished = false;
+      let poll = null;
+
       const update = async () => {
         try {
           const data = await api("/runs/" + encodeURIComponent(runId));
-          const lines = data.jobs.map((job, index) => (index + 1) + ". " + job.status + " (" + job.prompt_id + ")");
+          failures = 0;
+          const lines = data.jobs.map((job, index) => {
+            for (const nodeOutput of Object.values(job.outputs || {})) {
+              if (!nodeOutput || typeof nodeOutput !== "object") continue;
+              for (const kind of ["images", "gifs", "videos", "audio"]) {
+                for (const asset of nodeOutput[kind] || []) {
+                  if (!asset || typeof asset.filename !== "string" || asset.type !== "output") continue;
+                  const key = [job.prompt_id, asset.filename, asset.subfolder || ""].join(":");
+                  if (rendered.has(key)) continue;
+                  rendered.add(key);
+                  const query = new URLSearchParams({
+                    filename: asset.filename, subfolder: asset.subfolder || "", type: "output",
+                  });
+                  const anchor = el("a", { href: "/view?" + query, text: asset.filename }, resultLinks);
+                  anchor.target = "_blank";
+                  anchor.rel = "noopener noreferrer";
+                  resultLinks.appendChild(document.createTextNode("  "));
+                }
+              }
+            }
+            return (index + 1) + ". " + job.status + " (" + job.prompt_id + ")";
+          });
           output.textContent = "Run " + runId + "\n" + lines.join("\n") +
-            "\nKết quả xem trong ComfyUI History / Output.";
-          if (data.jobs.every((job) => !["queued", "running", "unknown"].includes(job.status))) {
-            stopped = true;
-          }
+            (data.dispatch_error ? "\nCó lỗi khi đưa tác vụ vào hàng đợi." : "");
+          finished = data.jobs.every((job) =>
+            ["completed", "failed", "cancelled", "not_submitted"].includes(job.status));
+          if (finished) cancel.disabled = true;
         } catch (error) {
-          output.textContent = "Không lấy được trạng thái: " + error.message;
-          stopped = true;
+          failures += 1;
+          output.textContent = "Không lấy được trạng thái: " + error.message +
+            (failures < 4 ? " (đang thử lại)" : " (ngừng cập nhật tự động)");
+          if (failures >= 4) finished = true;
         }
-        if (stopped && pollTimer) {
-          clearInterval(pollTimer);
-          pollTimer = null;
+        if (finished && poll !== null) {
+          clearInterval(poll);
+          pollTimers.delete(runId);
         }
       };
-      await update();
-      if (!stopped) pollTimer = setInterval(update, 3000);
-      const cancel = el("button", { text: "Hủy run" }, messages);
       cancel.addEventListener("click", async () => {
         try {
-          await api("/runs/" + encodeURIComponent(runId) + "/cancel", "POST", {});
-          message("Đã gửi yêu cầu hủy.");
+          const response = await api("/runs/" + encodeURIComponent(runId) + "/cancel", "POST", {});
+          message(response.cancelled_prompt_ids.length ?
+            "Đã yêu cầu hủy " + response.cancelled_prompt_ids.length + " tác vụ." :
+            "Không còn tác vụ đang chạy hoặc chờ để hủy.");
           cancel.disabled = true;
+          await update();
         } catch (error) { message("Lỗi hủy: " + error.message); }
       });
+      pollTimers.set(runId, true);
+      await update();
+      if (!finished) {
+        poll = setInterval(update, 3000);
+        pollTimers.set(runId, poll);
+      } else {
+        pollTimers.delete(runId);
+      }
     }
 
     send.addEventListener("click", async () => {
       if (busy || !prompt.value.trim()) return;
+      const batch = Number(count.value);
+      if (!Number.isInteger(batch) || batch < 1 || batch > 8) {
+        message("Số tác vụ phải là số nguyên từ 1 đến 8.");
+        return;
+      }
       const userText = prompt.value.trim();
       message(userText, true);
       setBusy(true);
       try {
         const data = await api("/chat", "POST", {
           message: userText,
+          count: batch,
+          ...(sessionId ? { session_id: sessionId } : {}),
           ...(workflow.value ? { workflow_id: workflow.value } : {}),
         });
-        message("Kế hoạch đề xuất:\n" + JSON.stringify(data.plan, null, 2));
+        sessionId = data.session_id;
+        if (currentConfirm) currentConfirm.disabled = true;
+        message("Kế hoạch đề xuất (hết hạn sau " + Math.round(data.expires_in_seconds / 60) +
+          " phút):\n" + JSON.stringify(data.plan, null, 2));
+        message("Có thể gửi tiếp yêu cầu chỉnh sửa. Agent sẽ dùng ngữ cảnh kế hoạch trước.");
         const confirm = el("button", { text: "✓ Xác nhận chạy" }, messages);
+        currentConfirm = confirm;
         confirm.addEventListener("click", async () => {
           confirm.disabled = true;
           try {
             const run = await api("/runs", "POST", { plan_id: data.plan_id });
+            message(run.replayed ? "Tác vụ đã được xếp hàng trước đó; dùng lại Run ID." :
+              "Đã xác nhận và đưa vào hàng đợi.");
             await followRun(run.run_id);
-          } catch (error) { message("Không chạy được: " + error.message); }
-        }, { once: true });
+          } catch (error) {
+            message("Không chạy được: " + error.message);
+            if (error.detail?.run_id) {
+              message("Tác vụ có thể đã được nhận; kiểm tra Run ID: " + error.detail.run_id);
+              await followRun(error.detail.run_id);
+            } else if (error.status !== 409 && error.status !== 400) {
+              confirm.disabled = false;
+            }
+          }
+        });
         prompt.value = "";
       } catch (error) {
         message("Không lập được kế hoạch: " + error.message);
@@ -170,6 +240,7 @@ app.registerExtension({
         send.click();
       }
     });
-    message("Nhập token, tải danh sách workflow, rồi gửi yêu cầu. Mọi lần chạy đều cần xác nhận.");
+    message("Nhập token, tải workflow và trò chuyện nhiều lượt để tinh chỉnh kế hoạch. " +
+      "Mỗi lượt chạy phải được xác nhận. Phiên hội thoại chỉ lưu trong bộ nhớ server.");
   },
 });
