@@ -60,6 +60,14 @@ Supports all operating systems and GPU types (NVIDIA, AMD, Intel, Apple Silicon,
 #### [Comfy Cloud](https://www.comfy.org/cloud)
 - Our official paid cloud version for those who can't afford local hardware.
 
+### Native Comfy Agent Panel (optional preview)
+
+This fork reuses ComfyUI's **official Agent Panel**; it does not install a second chat
+interface. For local use, install the optional pre-release
+`comfy-agent[go-nonfree]` package into the same environment and start ComfyUI
+with `--enable-agent`. Read the [native Agent setup, health checks and
+limitations](NATIVE_AGENT_PANEL.md) before enabling it.
+
 ## Examples
 See what ComfyUI can do with the [newer template workflows](https://comfy.org/workflows) or old [example workflows](https://comfyanonymous.github.io/ComfyUI_examples/).
 
