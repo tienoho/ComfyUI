@@ -86,7 +86,17 @@ app.registerExtension({
     let llmConfigured = false;
     let workflowCatalog = [];
     let installedCheckpoints = [];
+    let currentSave = null;
     const pollTimers = new Map();
+
+    const updateModelSelector = () => {
+      const definition = workflowCatalog.find((item) => item.id === workflow.value) ||
+        (workflowCatalog.length === 1 ? workflowCatalog[0] : null);
+      const supportsModel = Boolean(definition?.inputs?.checkpoint);
+      checkpoint.hidden = !supportsModel;
+      if (!supportsModel) checkpoint.value = "";
+    };
+    workflow.addEventListener("change", updateModelSelector);
 
     const message = (text, isUser = false) => {
       const bubble = el("div", { className: "comfy-automation-message" + (isUser ? " comfy-automation-user" : "") }, messages);
@@ -135,6 +145,7 @@ app.registerExtension({
         for (const modelName of installedCheckpoints) {
           el("option", { value: modelName, text: modelName }, checkpoint);
         }
+        updateModelSelector();
         try {
           const nativeFeatures = await fetch("/features", { credentials: "same-origin" });
           if (nativeFeatures.ok) {
@@ -298,13 +309,16 @@ app.registerExtension({
       save = el("button", { text: "Lưu chỉnh sửa", className: "comfy-automation-secondary", disabled: true }, actions);
       confirm = el("button", { text: "Xác nhận chạy" }, actions);
       currentConfirm = confirm;
+      currentSave = save;
 
       const needModel = () =>
-        installedCheckpoints.length > 1 && definition?.inputs?.checkpoint &&
-        !active.plan.parameters.checkpoint;
+        Boolean(definition?.inputs?.checkpoint) &&
+        installedCheckpoints.length !== 1 && !active.plan.parameters.checkpoint;
       if (needModel()) {
         confirm.disabled = true;
-        el("div", { text: "Có nhiều checkpoint; cần chọn model rồi lưu trước khi chạy." }, wrapper);
+        el("div", { text: installedCheckpoints.length === 0 ?
+          "Chưa cài checkpoint. Không thể chạy Text-to-Image." :
+          "Có nhiều checkpoint; cần chọn model rồi lưu trước khi chạy." }, wrapper);
       }
 
       save.addEventListener("click", async () => {
@@ -374,6 +388,10 @@ app.registerExtension({
 
     send.addEventListener("click", async () => {
       if (busy || !prompt.value.trim()) return;
+      if (!workflowCatalog.length) {
+        message("Cần nhập token và tải danh sách workflow trước khi lập kế hoạch.");
+        return;
+      }
       const hasBatch = count.value.trim() !== "";
       const batch = hasBatch ? Number(count.value) : null;
       if (hasBatch && (!Number.isInteger(batch) || batch < 1 || batch > 8)) {
@@ -384,8 +402,11 @@ app.registerExtension({
       message(userText, true);
       const indicator = message("Đang lập kế hoạch từ yêu cầu...");
       const previousConfirm = currentConfirm;
+      const previousSave = currentSave;
       const wasConfirmEnabled = previousConfirm && !previousConfirm.disabled;
+      const wasSaveEnabled = previousSave && !previousSave.disabled;
       if (previousConfirm) previousConfirm.disabled = true;
+      if (previousSave) previousSave.disabled = true;
       setBusy(true);
       try {
         let canvasContext = null;
@@ -424,6 +445,7 @@ app.registerExtension({
       } catch (error) {
         indicator.textContent = "Không lập được kế hoạch: " + error.message;
         if (wasConfirmEnabled && previousConfirm) previousConfirm.disabled = false;
+        if (wasSaveEnabled && previousSave) previousSave.disabled = false;
         if (error.status === 404 && sessionId) {
           sessionId = null;
           message("Phiên chat đã hết hạn; gửi lại để tạo phiên mới.");
