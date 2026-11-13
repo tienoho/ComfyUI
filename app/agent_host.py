@@ -49,6 +49,8 @@ def load() -> bool:
     """Find and create the agent host. Reports why when it can't; nothing about
     the installed package can stop ComfyUI from starting."""
     global _host, _failure
+    if _host is not None or _failure is not None:
+        return _failure is None
     try:
         points = list(importlib.metadata.entry_points(group=ENTRY_POINT_GROUP))
         matches = [ep for ep in points if ep.name == PROTOCOL]
