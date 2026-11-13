@@ -66,3 +66,30 @@ jobs:
               "starting", "ready", "failed")
           print("Comfy Agent wheel: v1 host contract OK")
           PY
+
+
+  real-fork-agent-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install ComfyUI CPU runtime and matching official Agent wheel
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install -r requirements.txt
+          python -m pip install --pre "comfy-agent[go-nonfree]==0.1.0rc8"
+      - name: Start real fork with --enable-agent and probe same-origin host
+        run: |
+          set -eu
+          python main.py --cpu --enable-agent --disable-auto-launch --disable-all-custom-nodes > /tmp/comfy-native-agent-smoke.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          if ! python script_examples/check_native_agent.py --wait-seconds 120; then
+            tail -n 160 /tmp/comfy-native-agent-smoke.log
+            exit 1
+          fi
+          echo "Native official Agent entry point, process and ComfyUI /api/agent route: PASS"
