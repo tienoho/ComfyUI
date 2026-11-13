@@ -188,9 +188,12 @@ def feature_flag():
         status = _host.status()
         if not isinstance(status, dict) or status.get("state") not in ("starting", "ready", "failed"):
             raise ValueError("Invalid comfy-agent host status")
+        reason = status.get("reason")
+        if reason is not None and not isinstance(reason, str):
+            raise ValueError("Invalid comfy-agent host status reason")
         flag = {"state": status["state"]}
-        if status.get("reason"):
-            flag["reason"] = status["reason"]
+        if reason:
+            flag["reason"] = reason
         return flag
     except SystemExit:  # a wheel that exits is broken, not briefly unhealthy, so disable it
         logging.exception("The local agent's status could not be read; it is disabled.")
