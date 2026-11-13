@@ -1,0 +1,32 @@
+name: Chat Automation contract tests
+
+on:
+  pull_request:
+    paths:
+      - 'custom_nodes/comfyui_agent_automation/**'
+      - 'tests-unit/agent_automation_test.py'
+      - '.github/workflows/chat-automation-tests.yml'
+  push:
+    branches:
+      - feat/chat-agent-workflow-automation
+    paths:
+      - 'custom_nodes/comfyui_agent_automation/**'
+      - 'tests-unit/agent_automation_test.py'
+      - '.github/workflows/chat-automation-tests.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  registry-tests:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install test runner
+        run: python -m pip install pytest
+      - name: Run CPU-only validation tests
+        run: python -m pytest -q tests-unit/agent_automation_test.py
