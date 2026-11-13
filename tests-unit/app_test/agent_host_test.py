@@ -46,6 +46,7 @@ def _reset(monkeypatch):
     monkeypatch.setattr(agent_host, "_host", None)
     monkeypatch.setattr(agent_host, "_failure", None)
     monkeypatch.setattr(agent_host, "_status_logged", False)
+    monkeypatch.setattr(agent_host, "_stopping", False)
     # The loader publishes the agent flag by mutating this shared dict; keep that
     # leakage out of other tests.
     feature_flags.SERVER_FEATURE_FLAGS.pop("agent", None)
@@ -311,3 +312,72 @@ def test_the_install_hint_upgrades_from_agent_requirements(monkeypatch, caplog, 
         agent_host.load()
     req = os.path.join(root, "agent_requirements.txt")
     assert any(f'pip install -U -r "{req}"' in r.getMessage() for r in caplog.records)
+
+
+def test_status_events_from_multiple_threads_are_deduplicated(monkeypatch):
+    _entry_points(monkeypatch, {"v1": FakeHost})
+    assert agent_host.load()
+    sent = []
+    server = SimpleNamespace(loop=None, send_sync=lambda event, data: sent.append((event, data)))
+    agent_host.start(server, "http", "127.0.0.1", 8188)
+    agent_host._host.state = {"state": "ready", "reason": None}
+    threads = [threading.Thread(target=agent_host._host.on_change) for _ in range(32)]
+    for worker in threads:
+        worker.start()
+    for worker in threads:
+        worker.join(3)
+        assert not worker.is_alive()
+    assert sent == [("agent_status", {"state": "ready"})]
+
+
+def test_agent_events_are_suppressed_after_stop(monkeypatch):
+    _entry_points(monkeypatch, {"v1": FakeHost})
+    assert agent_host.load()
+    sent = []
+    server = SimpleNamespace(loop=None, send_sync=lambda event, data: sent.append(data))
+    agent_host.start(server, "http", "127.0.0.1", 8188)
+    agent_host.stop()
+    agent_host._host.state = {"state": "ready", "reason": None}
+    agent_host._host.on_change()
+    assert sent == []
+    assert agent_host._host.stopped == 1
+
+
+def test_agent_drops_event_if_comfyui_loop_closed(monkeypatch):
+    _entry_points(monkeypatch, {"v1": FakeHost})
+    agent_host.load()
+    sent = []
+    server = SimpleNamespace(loop=None, send_sync=lambda event, data: sent.append(data))
+    agent_host.start(server, "http", "127.0.0.1", 8188)
+    loop = asyncio.new_event_loop()
+    loop.close()
+    server.loop = loop
+    agent_host._host.state = {"state": "ready", "reason": None}
+    agent_host._host.on_change()
+    assert sent == []
+    server.loop = None
+    agent_host._host.on_change()
+    assert sent == [{"state": "ready"}]
+
+
+def test_runtimeerror_during_loop_shutdown_is_contained(monkeypatch):
+    _entry_points(monkeypatch, {"v1": FakeHost})
+    agent_host.load()
+    sent = []
+    def failing_sender(event, data):
+        raise RuntimeError("Event loop is closed")
+    server = SimpleNamespace(loop=None, send_sync=failing_sender)
+    agent_host.start(server, "http", "127.0.0.1", 8188)
+    agent_host._host.state = {"state": "ready", "reason": None}
+    agent_host._host.on_change()  # must not raise into the official wheel thread
+    server.send_sync = lambda event, data: sent.append(data)
+    agent_host._host.on_change()
+    assert sent == [{"state": "ready"}]
+
+
+@pytest.mark.parametrize("bad_status", [None, [], {}, {"state": "stopped"}, {"state": None}])
+def test_unexpected_wheel_status_fails_closed(monkeypatch, bad_status):
+    _entry_points(monkeypatch, {"v1": FakeHost})
+    assert agent_host.load()
+    monkeypatch.setattr(agent_host._host, "status", lambda: bad_status)
+    assert agent_host.feature_flag() == {"state": "failed", "reason": "unknown"}
