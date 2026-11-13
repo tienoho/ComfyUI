@@ -65,12 +65,21 @@ def _cleanup():
     for session_id, item in list(_sessions.items()):
         if item["updated_at"] + _SESSION_TTL <= now:
             del _sessions[session_id]
-    # Never forget a live run merely because a long-running generation crossed
-    # the retention window. Results are kept 24 hours after the last observation
-    # of terminal state; ComfyUI history retains execution records independently.
+    # Keep active jobs even if a generation exceeds retention. Abandoned runs
+    # that are no longer in the engine queue must eventually be collected even
+    # when nobody ever polled their status; otherwise the 256-run cap leaks.
+    active_ids = None
     for run_id, item in list(_runs.items()):
-        if item["terminal_at"] is not None and item["terminal_at"] + _RUN_TTL <= now:
-            del _runs[run_id]
+        terminal_at = item["terminal_at"]
+        if terminal_at is not None:
+            if terminal_at + _RUN_TTL <= now:
+                del _runs[run_id]
+        elif item["created_at"] + _RUN_TTL <= now:
+            if active_ids is None:
+                running, queued = PromptServer.instance.prompt_queue.get_current_queue_volatile()
+                active_ids = {entry[1] for entry in running + queued}
+            if not any(prompt_id in active_ids for prompt_id in item["prompt_ids"]):
+                del _runs[run_id]
     for plan_id, run_id in list(_confirmed.items()):
         if run_id not in _runs:
             del _confirmed[plan_id]

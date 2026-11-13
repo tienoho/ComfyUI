@@ -150,7 +150,7 @@ in-process queue and state ownership.
 
 Run the fast, GPU-independent tests from the repository root:
 
-    python -m pytest -q tests-unit/agent_automation_test.py
+    python -m pytest -q tests-unit/agent_automation_test.py tests-unit/agent_automation_routes_test.py
 
 Then check manually on a machine with ComfyUI and an installed checkpoint:
 
@@ -198,9 +198,17 @@ confirmWorkflowRun operation.**
 - `unknown` means the engine has no visible queue/history record; it is not
   counted as successful. Manually cleared ComfyUI history can cause this.
 - Run state and session context live in RAM; they are not durable after
-  restart. Native ComfyUI history and output files remain independent.
+  restart. Completed runs are retained for up to 24 hours after a terminal
+  state is observed. Old unobserved runs are reaped only when their job IDs
+  have left the active ComfyUI queue. Native ComfyUI history and output files
+  remain independent.
 - A single shared Bearer token is **not** a multi-user identity or authorization
   system. Use only within a trusted local environment.
+- The token protects only this extension's /comfy-automation routes; it does
+  NOT add authentication or restrictions to ComfyUI's existing raw /prompt,
+  /queue, /history, /upload or other endpoints. Exposing the raw ComfyUI port
+  would let callers bypass this workflow registry. Restrict the network,
+  authenticate at a reverse proxy and/or use workspace governance controls.
 
 ## Verification limitations
 

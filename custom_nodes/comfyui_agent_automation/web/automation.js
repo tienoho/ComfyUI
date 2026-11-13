@@ -217,8 +217,9 @@ app.registerExtension({
           confirm.disabled = true;
           try {
             const run = await api("/runs", "POST", { plan_id: data.plan_id });
-            message(run.replayed ? "Tác vụ đã được xếp hàng trước đó; dùng lại Run ID." :
-              "Đã xác nhận và đưa vào hàng đợi.");
+            message(run.dispatch_error ? "Lần dispatch trước gặp lỗi; hãy kiểm tra trạng thái Run ID." :
+              (run.replayed ? "Tác vụ đã được xếp hàng trước đó; dùng lại Run ID." :
+              "Đã xác nhận và đưa vào hàng đợi."));
             await followRun(run.run_id);
           } catch (error) {
             message("Không chạy được: " + error.message);

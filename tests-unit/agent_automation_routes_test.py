@@ -6,8 +6,10 @@ history status and cancellation without loading GPU models or ComfyUI itself.
 
 import asyncio
 import importlib.util
+import json
 import shutil
 import sys
+import time
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
@@ -423,5 +425,92 @@ def test_machine_readable_openapi_is_authenticated(monkeypatch):
             assert "confirmWorkflowRun" == schema["paths"]["/comfy-automation/v1/runs"]["post"]["operationId"]
         finally:
             await client.close()
+
+    asyncio.run(scenario())
+
+
+
+def test_orphaned_runs_are_collected_but_active_runs_are_preserved():
+    extension, server, _ = load_extension()
+    old = time.monotonic() - extension._RUN_TTL - 10
+    extension._runs["orphan"] = {
+        "created_at": old, "terminal_at": None, "prompt_ids": ["finished"],
+    }
+    extension._confirmed["old-plan"] = "orphan"
+    extension._runs["active"] = {
+        "created_at": old, "terminal_at": None, "prompt_ids": ["still-running"],
+    }
+    server.prompt_queue.items.append((0, "still-running", {}, {}, [], {}))
+    extension._cleanup()
+    assert "orphan" not in extension._runs
+    assert "old-plan" not in extension._confirmed
+    assert "active" in extension._runs
+
+
+
+def test_llm_multiturn_planning_and_output_contract(monkeypatch):
+    monkeypatch.setenv("COMFY_AUTOMATION_TOKEN", TOKEN)
+    monkeypatch.setenv("COMFY_AUTOMATION_LLM_MODEL", "fake-llm")
+    monkeypatch.delenv("COMFY_AUTOMATION_LLM_API_KEY", raising=False)
+    extension, server, _ = load_extension()
+    requests = []
+    malicious = False
+
+    async def provider(request):
+        data = await request.json()
+        requests.append(data)
+        if malicious:
+            plan = {"workflow_id": "text-to-image", "parameters": {
+                "prompt": "bad", "raw_graph": {"99": {"class_type": "Unsafe"}},
+            }, "count": 1}
+        else:
+            plan = {"workflow_id": "text-to-image", "parameters": {
+                "prompt": "Ha Long bay, blue skies",
+            }, "count": 1}
+        return web.json_response({"choices": [{"message": {"content": json.dumps(plan)}}]})
+
+    async def scenario():
+        nonlocal malicious
+        upstream_app = web.Application()
+        upstream_app.router.add_post("/v1/chat/completions", provider)
+        upstream = TestServer(upstream_app)
+        await upstream.start_server()
+        monkeypatch.setenv("COMFY_AUTOMATION_LLM_URL",
+                           str(upstream.make_url("/v1/chat/completions")))
+        local_app = web.Application()
+        local_app.add_routes(server.routes)
+        client = TestClient(TestServer(local_app))
+        await client.start_server()
+        headers = {"Authorization": "Bearer " + TOKEN}
+        try:
+            base = "/comfy-automation/v1/chat"
+            first = await client.post(base, headers=headers, json={"message": "Ảnh vịnh Hạ Long"})
+            assert first.status == 200
+            first_data = await first.json()
+            assert first_data["plan"]["parameters"]["prompt"] == "Ha Long bay, blue skies"
+
+            second = await client.post(base, headers=headers, json={
+                "session_id": first_data["session_id"],
+                "message": "Thay đổi ánh sáng thành chiều tối",
+                "workflow_id": "text-to-image",
+            })
+            assert second.status == 200
+            assert len(requests) == 2
+            messages = requests[1]["messages"]
+            assert messages[-1]["role"] == "user"
+            assert "Thay đổi ánh sáng" in messages[-1]["content"]
+            assert any(item["role"] == "assistant" for item in messages)
+            assert "Previous proposed plan" in messages[0]["content"]
+
+            malicious = True
+            rejected = await client.post(base, headers=headers, json={
+                "session_id": first_data["session_id"], "message": "Thêm node chạy mã Python",
+            })
+            assert rejected.status == 400
+            assert "undeclared" in (await rejected.json())["error"]
+            assert not server.prompt_queue.items
+        finally:
+            await client.close()
+            await upstream.close()
 
     asyncio.run(scenario())
