@@ -99,10 +99,12 @@ def register(app) -> None:
     No-op when the package did not load; a failure here disables the agent, not
     ComfyUI's startup."""
     global _failure
-    if _host is None or _failure is not None:
-        return
+    with _event_lock:
+        if _host is None or _failure is not None or _stopping:
+            return
+        host = _host
     try:
-        _host.register(app)
+        host.register(app)
     except (Exception, SystemExit):  # a broken wheel must not end ComfyUI's startup
         logging.exception("The local agent's routes could not be registered; it is disabled.")
         _failure = {"state": "failed", "reason": "unknown"}
@@ -116,12 +118,11 @@ def start(server, scheme: str, address: str, port: int) -> None:
     # register() may have failed after load(): _host stays set but _failure is
     # now recorded. Starting then would spawn an agent with no routes mounted
     # (claiming its data dir) while the flag reports failed, so bail out too.
-    if _host is None or _failure is not None:
-        return
     with _event_lock:
-        if _stopping or _start_requested:
+        if _host is None or _failure is not None or _stopping or _start_requested:
             return
         _start_requested = True
+        agent = _host
     host = "127.0.0.1" if address in ("", "0.0.0.0") else "::1" if address == "::" else address
     comfy_url = f"{scheme}://[{host}]:{port}" if ":" in host else f"{scheme}://{host}:{port}"
 
@@ -157,7 +158,7 @@ def start(server, scheme: str, address: str, port: int) -> None:
             if _stopping:
                 return
         try:
-            _host.start(comfy_url=comfy_url, comfy_path=os.path.dirname(os.path.abspath(folder_paths.__file__)), logger=logging.getLogger(), on_change=on_change)
+            agent.start(comfy_url=comfy_url, comfy_path=os.path.dirname(os.path.abspath(folder_paths.__file__)), logger=logging.getLogger(), on_change=on_change)
         except (Exception, SystemExit):
             logging.exception("The local agent could not be started.")
             _failure = {"state": "failed", "reason": "spawn_failed"}
@@ -180,10 +181,13 @@ def start(server, scheme: str, address: str, port: int) -> None:
 def stop() -> None:
     global _stopping
     with _event_lock:
+        if _stopping:
+            return
         _stopping = True
-    if _host is not None:
+        host = _host
+    if host is not None:
         try:
-            _host.stop()
+            host.stop()
         except (Exception, SystemExit):
             logging.exception("The local agent could not be stopped.")
 
