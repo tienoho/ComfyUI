@@ -512,3 +512,27 @@ def test_native_agent_state_transition_logging_is_deduplicated(monkeypatch, capl
         host.on_change()
     assert sent == [("agent_status", {"state": "ready"})]
     assert _agent_records(caplog) == ["[agent-event] agent_state_changed state=ready"]
+
+
+def test_repeated_stop_calls_vendor_once(monkeypatch):
+    _entry_points(monkeypatch, {"v1": FakeHost})
+    assert agent_host.load()
+    agent_host.stop()
+    agent_host.stop()
+    assert agent_host._host.stopped == 1
+
+
+def test_register_after_shutdown_is_suppressed(monkeypatch):
+    _entry_points(monkeypatch, {"v1": FakeHost})
+    assert agent_host.load()
+    agent_host.stop()
+    agent_host.register(object())
+    assert agent_host._host.registered == []
+
+
+def test_start_does_not_run_when_shutdown_precedes_start(monkeypatch):
+    _entry_points(monkeypatch, {"v1": FakeHost})
+    assert agent_host.load()
+    agent_host.stop()
+    agent_host.start(SimpleNamespace(loop=None, send_sync=lambda *args: None), "http", "127.0.0.1", 8188)
+    assert agent_host._host.started is None
