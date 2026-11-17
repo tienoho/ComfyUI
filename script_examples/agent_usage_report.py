@@ -73,7 +73,7 @@ def parse_completion(event: object) -> Completion | None:
         raise UsageReportError("Agent usage must be an object or null")
     usage = usage or {}
     tokens = tuple(_counter(usage.get(k), k) for k in TOKEN_KEYS)
-    charge = _counter(usage.get("charge_micro_usd"), "charge_micro_usd", minimum=1)
+    charge = _counter(usage.get("charge_micro_usd"), "charge_micro_usd", minimum=0)
     model_id = None
     source = None
     receipt = data.get("model_receipt")
