@@ -48,6 +48,30 @@ def test_wrapper_reconnect_and_other_frames_are_safe():
     assert "PRIVATE PROMPT" not in json.dumps(result)
 
 
+def test_explicit_zero_charge_is_known_and_not_missing():
+    result = report.summarize_lines(jsonl(
+        event(message="free", usage={"input_tokens": 10, "charge_micro_usd": 0}),
+        event(message="unknown", usage={"input_tokens": 2}),
+    ))
+    charge = result["overall"]["vendor_model_charge"]
+    assert charge["known_micro_usd"] == 0
+    assert charge["known_usd"] == "0.000000"
+    assert charge["reported_turns"] == 1
+    assert charge["unknown_turns"] == 1
+    assert charge["is_complete"] is False
+
+
+def test_all_explicit_zero_charges_are_complete():
+    result = report.summarize_lines(jsonl(
+        event(message="m1", usage={"charge_micro_usd": 0}),
+        event(message="m2", usage={"charge_micro_usd": 0}),
+    ))
+    charge = result["overall"]["vendor_model_charge"]
+    assert charge["reported_turns"] == 2
+    assert charge["unknown_turns"] == 0
+    assert charge["is_complete"] is True
+
+
 def test_missing_charge_does_not_contaminate_known_charge():
     result = report.summarize_lines(jsonl(
         event(message="m1", usage={"input_tokens": 10}),
@@ -77,7 +101,7 @@ def test_text_not_mistaken_for_model_provenance():
     assert result["by_model"]["unknown"]["turns"] == 1
 
 
-@pytest.mark.parametrize("bad", [0, -1, 1.2, True, "3", 2**64])
+@pytest.mark.parametrize("bad", [-1, 1.2, True, "3", 2**64])
 def test_invalid_charge_fails_closed(bad):
     with pytest.raises(report.UsageReportError, match="charge_micro_usd"):
         report.summarize_lines(jsonl(event(usage={"charge_micro_usd": bad})))
