@@ -8,6 +8,6 @@ The notebook clones `tienoho/ComfyUI`, installs the repository dependencies and 
 
 ## Review hardening (17 November 2026)
 
-The notebook explicitly clones `feat/colab-gpu-native-agent-20261117` until this PR is merged, verifies an existing checkout's Git origin and branch, and refuses to start when port 8188 is already occupied. The initial HTTP `/features` check is **only** a server-startup check; the later native probe checks Agent readiness independently. An Agent probe failure is reported, not bypassed. The optional pre-release package is not guaranteed to install or authenticate on every Colab image.
+The notebook clones `master` after the upstream integration, verifies an existing checkout's Git origin and branch, and refuses to start when port 8188 is already occupied. The initial HTTP `/features` check is **only** a server-startup check; the later native probe checks Agent readiness independently. An Agent probe failure is reported, not bypassed. The optional pre-release package is not guaranteed to install or authenticate on every Colab image.
 
-After merge, update `REPO_REF` to the merged release or an immutable tested commit before treating the notebook as a stable entry point. Do not assume that cloning `master` contains the latest PR changes.
+For reproducible production-like UAT, pin `REPO_REF` to a reviewed immutable commit in a private copy of this notebook. On repeated runs, an existing checkout is checked against the remote; it is never silently overwritten.
