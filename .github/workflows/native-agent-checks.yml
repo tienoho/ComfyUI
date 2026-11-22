@@ -2,27 +2,9 @@ name: Native Comfy Agent host probe
 
 on:
   pull_request:
-    paths:
-      - 'app/agent_host.py'
-      - 'tests-unit/app_test/agent_host_test.py'
-      - 'script_examples/check_native_agent.py'
-      - 'script_examples/agent_usage_report.py'
-      - 'tests-unit/agent_usage_report_test.py'
-      - 'tests-unit/native_agent_panel_check_test.py'
-      - 'NATIVE_AGENT_PANEL.md'
-      - '.github/workflows/native-agent-checks.yml'
   push:
     branches:
-      - feat/chat-agent-workflow-automation
-    paths:
-      - 'app/agent_host.py'
-      - 'tests-unit/app_test/agent_host_test.py'
-      - 'script_examples/check_native_agent.py'
-      - 'script_examples/agent_usage_report.py'
-      - 'tests-unit/agent_usage_report_test.py'
-      - 'tests-unit/native_agent_panel_check_test.py'
-      - 'NATIVE_AGENT_PANEL.md'
-      - '.github/workflows/native-agent-checks.yml'
+      - master
 
 permissions:
   contents: read
@@ -41,9 +23,9 @@ jobs:
       - name: Compile native integration and tests
         run: |
           python -m py_compile app/agent_host.py script_examples/check_native_agent.py script_examples/agent_usage_report.py
-          python -m py_compile tests-unit/app_test/agent_host_test.py tests-unit/native_agent_panel_check_test.py tests-unit/agent_usage_report_test.py
+          python -m py_compile tests-unit/app_test/agent_host_test.py tests-unit/native_agent_panel_check_test.py tests-unit/agent_usage_report_test.py tests-unit/colab_notebook_test.py
       - name: Verify official feature and route contract
-        run: python -m pytest -q tests-unit/native_agent_panel_check_test.py tests-unit/app_test/agent_host_test.py tests-unit/agent_usage_report_test.py
+        run: python -m pytest -q tests-unit/native_agent_panel_check_test.py tests-unit/app_test/agent_host_test.py tests-unit/agent_usage_report_test.py tests-unit/colab_notebook_test.py
 
   official-wheel-contract:
     runs-on: ubuntu-latest
